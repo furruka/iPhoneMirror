@@ -142,7 +142,9 @@ if(IPHONEMIRROR_BUILD_TESTS)
             src/Protocol/QuickTimeSession.cpp
             src/Media/H264.cpp
             src/Media/CoreMedia.cpp
+            src/Media/VideoFrameCopy.cpp
             src/Media/MediaFoundationDecoder.cpp
+            src/Audio/PcmBufferPolicy.cpp
             src/Audio/WasapiRenderer.cpp
             src/Transport/Socket.cpp
             src/Transport/UsbMuxClient.cpp
