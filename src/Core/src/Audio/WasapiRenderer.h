@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Media/CoreMedia.h"
+#include "Audio/PcmBufferPolicy.h"
 
 #include <array>
 #include <atomic>
@@ -13,38 +14,6 @@
 #include <vector>
 
 namespace iPhoneMirror::audio {
-
-namespace detail {
-
-struct WasapiBufferLayout {
-    std::uint32_t block_align{};
-    std::size_t capacity_frames{};
-    std::size_t capacity_bytes{};
-};
-
-struct WasapiQueueThresholds {
-    std::size_t startup_frames{};
-    std::size_t high_water_frames{};
-};
-
-struct WasapiEnqueuePlan {
-    std::size_t drop_existing_frames{};
-    std::size_t final_frames{};
-};
-
-[[nodiscard]] std::optional<WasapiBufferLayout> checked_wasapi_buffer_layout(
-    const coremedia::AudioStreamBasicDescription& format,
-    std::size_t minimum_capacity_frames = 0) noexcept;
-[[nodiscard]] WasapiQueueThresholds wasapi_queue_thresholds(
-    std::size_t maximum_packet_frames, std::size_t capacity_frames,
-    std::size_t endpoint_buffer_frames = 0,
-    std::size_t base_startup_frames = 3072,
-    std::size_t base_high_water_frames = 4096) noexcept;
-[[nodiscard]] WasapiEnqueuePlan plan_wasapi_enqueue(
-    std::size_t queued_frames, std::size_t incoming_frames,
-    std::size_t capacity_frames, WasapiQueueThresholds thresholds) noexcept;
-
-} // namespace detail
 
 enum class WasapiBufferingMode {
     LowLatency,

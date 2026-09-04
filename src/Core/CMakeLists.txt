@@ -1,23 +1,28 @@
-# Platform-neutral protocol, container and bitstream code. These translation
-# units compile with MSVC, GCC and Clang and are shared by both platforms.
+# Platform-neutral protocol, container, bitstream, transport and decoded-video
+# code. These translation units compile with MSVC, GCC and Clang and are shared
+# by both platforms.
 set(IPHONEMIRROR_CORE_PORTABLE_SOURCES
     src/Protocol/Plist.cpp
     src/Protocol/QuickTimePacket.cpp
     src/Protocol/QuickTimeSession.cpp
     src/Media/H264.cpp
     src/Media/CoreMedia.cpp
+    src/Media/VideoFrameCopy.cpp
+    src/Audio/PcmBufferPolicy.cpp
+    src/Text/Utf.cpp
+    src/Transport/Socket.cpp
+    src/Transport/QtUsbTransport.cpp
 )
 
 # Windows-only subsystems: Media Foundation decoding, WASAPI playback, D3D11
 # preview, SetupAPI discovery, the libusb-win32 filter transport and the named
-# pipe receiver hub. The Linux replacements live in the Linux source list.
+# pipe receiver hub. Socket and QtUsbTransport have moved to the portable list;
+# the Linux replacements for the rest live in the Linux source list.
 set(IPHONEMIRROR_CORE_WINDOWS_SOURCES
     resources/iPhoneMirror.Core.rc
     src/CoreApi.cpp
     src/Logging.cpp
-    src/Transport/Socket.cpp
     src/Transport/UsbMuxClient.cpp
-    src/Transport/QtUsbTransport.cpp
     src/Transport/LibUsb0Transport.cpp
     src/Device/AppleUsbDiscovery.cpp
     src/Device/DeviceManager.cpp
@@ -92,6 +97,12 @@ if(WIN32)
             ${PROJECT_SOURCE_DIR}/third_party/libusb/bin/x64/libusb-1.0.dll
             $<TARGET_FILE_DIR:iPhoneMirror.Core>/libusb-1.0.dll
     )
+else()
+    # QtUsbTransport in the portable source list talks to libusb-1.0 directly;
+    # the distribution library replaces the vendored Windows one.
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(IPHONEMIRROR_LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)
+    target_link_libraries(iPhoneMirror.Core PRIVATE PkgConfig::IPHONEMIRROR_LIBUSB)
 endif()
 
 set_target_properties(iPhoneMirror.Core PROPERTIES
@@ -192,6 +203,16 @@ if(IPHONEMIRROR_BUILD_TESTS)
     target_link_libraries(iPhoneMirror.OutputModeState.Tests PRIVATE
         iPhoneMirror.CompileOptions)
     add_test(NAME OutputModeStateTests COMMAND iPhoneMirror.OutputModeState.Tests)
+
+    # Exercises the shared UTF helpers on both platforms; see Text/Utf.h.
+    add_executable(iPhoneMirror.Utf.Tests
+        tests/UtfTests.cpp
+        src/Text/Utf.cpp)
+    target_include_directories(iPhoneMirror.Utf.Tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(iPhoneMirror.Utf.Tests PRIVATE
+        iPhoneMirror.CompileOptions)
+    add_test(NAME UtfTests COMMAND iPhoneMirror.Utf.Tests)
 
     add_executable(iPhoneMirror.UsbConfigurationRestorePolicy.Tests
         tests/UsbConfigurationRestorePolicyTests.cpp)

@@ -1,7 +1,10 @@
 #include "Transport/QtUsbTransport.h"
 #include "Transport/AppleUsbIdentityCache.h"
 
+#ifdef _WIN32
 #include <Windows.h>
+#endif
+
 #include <algorithm>
 #include <array>
 #include <climits>
@@ -17,6 +20,9 @@ constexpr std::uint8_t VendorInterfaceClass = 0xff;
 constexpr std::uint8_t UsbMuxSubclass = 0xfe;
 constexpr std::uint8_t QuickTimeSubclass = 0x2a;
 
+#ifdef _WIN32
+// UsbDk is a Windows-only kernel filter backend; on Linux libusb talks to the
+// device directly, so the whole helper-installed probe is Windows code.
 bool regular_file_exists(const std::wstring& path) noexcept {
     const auto attributes = GetFileAttributesW(path.c_str());
     return attributes != INVALID_FILE_ATTRIBUTES &&
@@ -44,6 +50,7 @@ bool usbdk_helper_installed() noexcept {
         return false;
     }
 }
+#endif
 
 struct DeviceListDeleter {
     void operator()(libusb_device** devices) const noexcept { if (devices) libusb_free_device_list(devices, 1); }
@@ -534,6 +541,8 @@ void QtUsbConnection::close() noexcept {
     active_serial_.clear();
 }
 
+#ifdef _WIN32
+
 namespace {
 
 class WindowsUsbRuntimeProbeSource final : public UsbRuntimeProbeSource {
@@ -573,6 +582,41 @@ UsbRuntimeProbe probe_usb_runtime() noexcept {
     WindowsUsbRuntimeProbeSource source;
     return probe_usb_runtime(source, false);
 }
+
+#else
+
+namespace {
+
+// libusb owns the whole USB stack here: there is no UsbDk helper and no second
+// backend to probe, but the runtime metadata and the enumeration probe still
+// answer the same questions the Windows report answers.
+class LinuxUsbRuntimeProbeSource final : public UsbRuntimeProbeSource {
+public:
+    void read_user_mode_metadata(UsbRuntimeProbe& probe) override {
+        const auto* version = libusb_get_version();
+        probe.runtime_available = version != nullptr;
+        if (version) {
+            probe.version = std::format("{}.{}.{}.{}", version->major,
+                version->minor, version->micro, version->nano);
+        }
+    }
+
+    void probe_usb_backends(UsbRuntimeProbe& probe) override {
+        QtUsbContext default_context(false);
+        probe.apple_device_count =
+            static_cast<std::uint32_t>(default_context.enumerate().size());
+        probe.apple_device_count_probed = true;
+    }
+};
+
+} // namespace
+
+UsbRuntimeProbe probe_usb_runtime() noexcept {
+    LinuxUsbRuntimeProbeSource source;
+    return probe_usb_runtime(source, false);
+}
+
+#endif
 
 UsbRuntimeProbe probe_usb_runtime(UsbRuntimeProbeSource& source,
     bool probe_backends) noexcept {

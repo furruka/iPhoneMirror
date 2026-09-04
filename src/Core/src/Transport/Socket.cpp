@@ -1,12 +1,15 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 #include "Transport/Socket.h"
 
-#include <WS2tcpip.h>
-
-#include <algorithm>
 #include <array>
+#include <algorithm>
 #include <chrono>
 #include <format>
 #include <mutex>
+
+#ifdef _WIN32
+#include <WS2tcpip.h>
 
 namespace iPhoneMirror::transport {
 namespace {
@@ -174,3 +177,201 @@ void Socket::close() noexcept {
 }
 
 } // namespace iPhoneMirror::transport
+
+#else
+
+#include <arpa/inet.h>
+#include <cerrno>
+#include <cstring>
+#include <fcntl.h>
+#include <unistd.h>
+
+namespace iPhoneMirror::transport {
+namespace {
+
+// Mirrors the Windows flow: non-blocking connect, bounded select on writability,
+// then SO_ERROR to surface the handshake result. On POSIX the select limit must
+// cover the descriptor (nfds = handle + 1); Windows ignores that argument.
+Socket connect_with_timeout(const sockaddr* address, socklen_t address_length,
+    int timeout_ms) {
+    const SocketHandle handle = ::socket(address->sa_family, SOCK_STREAM, 0);
+    if (handle == kInvalidSocket) throw SocketError("socket", errno);
+    Socket result(handle);
+
+    const int flags = ::fcntl(handle, F_GETFL, 0);
+    if (flags < 0 || ::fcntl(handle, F_SETFL, flags | O_NONBLOCK) < 0) {
+        throw SocketError("fcntl", errno);
+    }
+
+    int status = ::connect(handle, address, address_length);
+    if (status < 0 && errno != EINPROGRESS) throw SocketError("connect", errno);
+    if (status < 0) {
+        fd_set write_set;
+        FD_ZERO(&write_set);
+        FD_SET(handle, &write_set);
+        timeval timeout{ timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
+        status = ::select(handle + 1, nullptr, &write_set, nullptr, &timeout);
+        if (status == 0) throw SocketError("connect timeout", ETIMEDOUT);
+        if (status < 0) throw SocketError("select", errno);
+        int socket_error{};
+        socklen_t size = sizeof(socket_error);
+        if (::getsockopt(handle, SOL_SOCKET, SO_ERROR,
+                reinterpret_cast<void*>(&socket_error), &size) < 0) {
+            throw SocketError("getsockopt", errno);
+        }
+        if (socket_error != 0) throw SocketError("connect", socket_error);
+    }
+
+    if (::fcntl(handle, F_SETFL, flags) < 0) {
+        throw SocketError("fcntl", errno);
+    }
+    result.set_timeout(timeout_ms);
+    return result;
+}
+
+timeval milliseconds_timeout(int timeout_ms) noexcept {
+    return timeval{ timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
+}
+
+} // namespace
+
+SocketError::SocketError(const char* operation, int error)
+    : std::runtime_error(std::format("{} failed (errno {})", operation, error)),
+      code_(error) {}
+
+Socket::~Socket() { close(); }
+
+Socket::Socket(Socket&& other) noexcept : handle_(other.handle_) {
+    other.handle_ = kInvalidSocket;
+}
+
+Socket& Socket::operator=(Socket&& other) noexcept {
+    if (this != &other) {
+        close();
+        handle_ = other.handle_;
+        other.handle_ = kInvalidSocket;
+    }
+    return *this;
+}
+
+Socket Socket::connect_loopback(std::uint16_t port, int timeout_ms) {
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    return connect_with_timeout(reinterpret_cast<const sockaddr*>(&address),
+        sizeof(address), timeout_ms);
+}
+
+Socket Socket::connect_unix(std::string_view path, int timeout_ms) {
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    if (path.size() >= sizeof(address.sun_path)) {
+        throw SocketError("unix path too long", ENAMETOOLONG);
+    }
+    std::memcpy(address.sun_path, path.data(), path.size());
+    return connect_with_timeout(reinterpret_cast<const sockaddr*>(&address),
+        sizeof(address), timeout_ms);
+}
+
+bool Socket::probe_loopback(std::uint16_t port, int timeout_ms) noexcept {
+    try {
+        auto socket = connect_loopback(port, timeout_ms);
+        return socket.valid();
+    } catch (...) {
+        return false;
+    }
+}
+
+void Socket::set_timeout(int timeout_ms) {
+    const auto receive_timeout = milliseconds_timeout(timeout_ms);
+    const auto send_timeout = milliseconds_timeout(timeout_ms);
+    if (::setsockopt(handle_, SOL_SOCKET, SO_RCVTIMEO,
+            &receive_timeout, sizeof(receive_timeout)) < 0 ||
+        ::setsockopt(handle_, SOL_SOCKET, SO_SNDTIMEO,
+            &send_timeout, sizeof(send_timeout)) < 0) {
+        throw SocketError("setsockopt", errno);
+    }
+}
+
+void Socket::send_all(std::span<const std::uint8_t> bytes) {
+    std::size_t offset{};
+    while (offset < bytes.size()) {
+        const auto amount = static_cast<std::size_t>(
+            std::min<std::size_t>(bytes.size() - offset, 1U << 20));
+        const auto sent = ::send(handle_, bytes.data() + offset, amount,
+            MSG_NOSIGNAL);
+        if (sent < 0) throw SocketError("send", errno);
+        if (sent == 0) throw SocketError("send closed", ECONNRESET);
+        offset += static_cast<std::size_t>(sent);
+    }
+}
+
+std::vector<std::uint8_t> Socket::receive_exact(std::size_t length) {
+    std::vector<std::uint8_t> result(length);
+    std::size_t offset{};
+    while (offset < length) {
+        const auto received = receive(std::span(result).subspan(offset));
+        if (received == 0) throw SocketError("receive closed", ECONNRESET);
+        offset += received;
+    }
+    return result;
+}
+
+std::size_t Socket::receive(std::span<std::uint8_t> destination) {
+    if (destination.empty()) return 0;
+    const auto amount = static_cast<std::size_t>(
+        std::min<std::size_t>(destination.size(), 1U << 20));
+    const auto received = ::recv(handle_, destination.data(), amount, 0);
+    if (received < 0) throw SocketError("recv", errno);
+    return static_cast<std::size_t>(received);
+}
+
+bool Socket::shutdown_send_and_wait_for_peer_close(int timeout_ms) noexcept {
+    if (handle_ == kInvalidSocket) return true;
+    if (timeout_ms <= 0) return false;
+
+    // A usbmux Connect socket is a device tunnel. Closing it immediately can
+    // leave lockdownd teardown queued in Apple's user-mode driver after the
+    // application-side discovery lease has been released. Half-close first
+    // and wait for peer EOF so the lease covers the real tunnel lifetime.
+    if (::shutdown(handle_, SHUT_WR) < 0) {
+        const auto error = errno;
+        // POSIX has no ESHUTDOWN; ENOTCONN covers the already-dead peer case
+        // that WSAESHUTDOWN does on Windows.
+        if (error != ENOTCONN) return false;
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(timeout_ms);
+    std::array<char, 512> buffer{};
+    for (;;) {
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now()).count();
+        if (remaining <= 0) return false;
+        const auto bounded_timeout = static_cast<int>(
+            std::min<std::int64_t>(remaining, 100));
+        const auto receive_timeout = milliseconds_timeout(bounded_timeout);
+        if (::setsockopt(handle_, SOL_SOCKET, SO_RCVTIMEO,
+                &receive_timeout, sizeof(receive_timeout)) < 0) return false;
+
+        const auto received = ::recv(handle_, buffer.data(), buffer.size(), 0);
+        if (received == 0) return true;
+        if (received < 0) {
+            const auto error = errno;
+            if (error == EAGAIN || error == EWOULDBLOCK) continue;
+            return error == ECONNRESET || error == ENOTCONN;
+        }
+    }
+}
+
+void Socket::close() noexcept {
+    if (handle_ != kInvalidSocket) {
+        ::close(handle_);
+        handle_ = kInvalidSocket;
+    }
+}
+
+} // namespace iPhoneMirror::transport
+
+#endif

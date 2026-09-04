@@ -48,6 +48,7 @@ Linux 后端一律以新增文件实现。
 |---|---|---|
 | P0 | fork 声明、许可合规、SPDX 基线 | `[x]` |
 | P1 | CMake 跨平台化；可移植模块在 Linux 编过并通过测试 | `[x]` |
+| P1-WP1 | 纯机械抽取：`VideoFormats.h`/`VideoFrameCopy.cpp`、`PcmBufferPolicy.{h,cpp}`、`Text/Utf`、`Socket` 跨平台 + AF_UNIX、`QtUsbTransport` 裁剪 | `[x]` |
 | P1-S1 | spike：libusb 只读枚举 + 读隐藏配置描述符（**需真机**） | `[~]` |
 | P1-S2 | spike：AF_UNIX usbmux `ListDevices`（**需真机**） | `[~]` |
 | P1-S3 | spike：Avalonia 嵌入原生 surface | `[x]` |
@@ -61,7 +62,16 @@ Linux 后端一律以新增文件实现。
 
 CI 现状（2026-09-05）：`linux-build.yml`（GCC/Clang 双矩阵）与 `windows-build.yml`
 在 fork 上均已通过——`windows-2025-vs2026` 是 GitHub 托管镜像 label（VS 2026 +
-CMake 4.4.2），不是自托管机。这是 P2 共享 `CaptureSession.cpp` 的前置闸门。
+CMake 4.4.2），不是自托管机。
+
+WP1 抽取（零行为变更，Windows CI 复验）：`MediaFoundationDecoder` 里的平台中性
+面（枚举、`DecodedFrame`、缓冲/letterbox/色彩数学）拆为 `Media/VideoFormats.h`
++ `Media/VideoFrameCopy.cpp`；`materialize_gpu_frame`（D3D11）与
+`classify_dxva_mode`（DXVA 常量）留在 Windows 翻译单元。WASAPI 的环形缓冲与
+队列阈值策略拆为 `Audio/PcmBufferPolicy.{h,cpp}`（PipeWire 将复用）。新增
+`Text/Utf`（Windows 走 WinAPI，Linux 手写 UTF-8↔UTF-32，含单测 `UtfTests`）。
+`Transport/Socket` 跨平台化并新增 `connect_unix`（AF_UNIX usbmuxd 用）；
+`QtUsbTransport` 的 UsbDk 探测包 `#ifdef`，Linux 走系统 libusb-1.0。
 
 P1 的构建结论：`src/Core` 的 5 个可移植翻译单元（Protocol / Media / CoreMedia / H264）
 在 GCC 16.2 与 Clang 22.1 下都能构建出 `libiPhoneMirror.Core.so`，`ctest` 3/3 通过
