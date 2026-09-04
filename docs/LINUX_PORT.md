@@ -52,12 +52,16 @@ Linux 后端一律以新增文件实现。
 | P1-S2 | spike：AF_UNIX usbmux `ListDevices`（**需真机**） | `[~]` |
 | P1-S3 | spike：Avalonia 嵌入原生 surface | `[x]` |
 | P1-S4 | spike：解码 → dmabuf → libplacebo 出画并测延迟 | `[x]` |
-| P2 | Core 抽平台缝；ABI 改 `im_char`，`ApiVersion` 18→19 | `[ ]` |
+| P2 | `CaptureSession.cpp` 抽缝共享（方案 X；`wchar_t` 保留，`ApiVersion` 保持 18）。前置条件：Windows CI 绿，**已满足** | `[ ]` |
 | P3 | Linux USB 采集（无头验证优先） | `[ ]` |
 | P4 | FFmpeg 解码 / libplacebo 渲染 / PipeWire 音频 | `[ ]` |
-| P5 | Avalonia GUI | `[ ]` |
+| P5 | Avalonia GUI（P5a 最小外壳进 M1，P5b 全量对齐随后） | `[ ]` |
 | P6 | UxPlay 引擎无线接收 | `[ ]` |
 | P7 | 打包、CI、文档 | `[ ]` |
+
+CI 现状（2026-09-05）：`linux-build.yml`（GCC/Clang 双矩阵）与 `windows-build.yml`
+在 fork 上均已通过——`windows-2025-vs2026` 是 GitHub 托管镜像 label（VS 2026 +
+CMake 4.4.2），不是自托管机。这是 P2 共享 `CaptureSession.cpp` 的前置闸门。
 
 P1 的构建结论：`src/Core` 的 5 个可移植翻译单元（Protocol / Media / CoreMedia / H264）
 在 GCC 16.2 与 Clang 22.1 下都能构建出 `libiPhoneMirror.Core.so`，`ctest` 3/3 通过
@@ -99,6 +103,11 @@ Avalonia 12.1.1 的 `ICompositionGpuInterop` 只接受 `VulkanOpaquePosixFileDes
   合成器的 vsync 等待，**不能当成渲染成本**。屏幕是 1920x1080@165Hz。
 - `VK_QUEUE_FAMILY_IGNORED` 与 `VK_QUEUE_FAMILY_EXTERNAL` 两种所有权移交方式实测
   没有差异，按 Avalonia 导入端不发 acquire barrier 的事实，应当用 `IGNORED`。
+  shim 现已把队列族固定为 `IGNORED`，托管侧不再暴露这个旋钮。
+- **呈现方向（2026-09-05 新增）**：Avalonia 导入端采样共享图像的 Y 方向与
+  libplacebo 渲染方向相反。渐变素材看不出来，真实视频第一张截图就是垂直镜像的。
+  shim 通过把渲染目标声明为 `flipped`（`pl_frame_from_swapchain` 的
+  `pl_swapchain_frame.flipped = true`）修正。**WP5 的正式渲染器必须保留这一点。**
 
 对 P5 的硬约束：
 1. **`Egl` 渲染后端不可用**，Linux 端必须强制 `X11RenderingMode.Vulkan`，并在拿不到
@@ -150,6 +159,20 @@ fourcc `RG88`，而 libplacebo 只注册了 `GR88`（分量顺序相反），`pl
    `VK_KHR_video_decode_queue`，NVIDIA 支持）。
 4. 渲染目标带 `export_handle = PL_HANDLE_FD` 后性能无明显变化（4.10 → 4.14 ms），
    说明 S3 要求的可导出目标不会拖累 S4 的解码渲染路径。
+
+**托管探针端到端复核（2026-09-05，shim 升级为真实解码渲染器后）**：
+S3 的 Avalonia 探针接上 FFmpeg 解码后再跑一遍同一素材（1170x2532@60，30 s，
+1800 帧），与上表 C 探针的数字互相印证：
+
+| 路径 | 结果 | 生产者每帧 | 端到端每帧 |
+|---|---|---|---|
+| VAAPI（`h264 (vaapi)`，renderD129）| 1800/1800 PASS | 1.9–3.4 ms | 6.8 ms |
+| 强制软解 | 1800/1800 PASS | 9.0 ms | 12.4 ms |
+
+报告里的 `decoder: h264 (vaapi)` 行与 VAAPI/软解的每帧差值（约 5–7 ms）
+互相印证硬件解码确实生效。`zero_copy` 字段在 `pms_describe` 时（首帧之前）
+尚不可知，所以探针打印的是建流快照；WP5 的正式渲染器拥有完整生命周期后
+再如实上报。
 
 ### S1 / S2：无设备部分已通过
 
@@ -205,13 +228,28 @@ cmake --build build/linux
 | S2 | `./build/linux/tools/linux-spikes/iPhoneMirror.Linux.UsbMuxUnixSocketProbe` |
 | S4 | `./build/linux/tools/linux-spikes/iPhoneMirror.Linux.DecodeRenderLatencyProbe <input> [--software] [--device /dev/dri/renderDN] [--vulkan-device NAME] [--export-target] [--frames N] [--verbose]` |
 
-S3 是托管进程，需要 .NET SDK 与真实合成器，并要能找到 CMake 构建出的
-`libiPhoneMirror.Linux.PlaceboSurfaceShim.so`：
+S3/S4 是托管进程，需要 .NET SDK 与真实合成器，并要能找到 CMake 构建出的
+`libiPhoneMirror.Linux.PlaceboSurfaceShim.so`。探针是双模式的：不带 `--input`
+跑固定帧数的渐变并打印 PASS/FAIL 与延迟统计（S3 的可复现口径）；带 `--input`
+解码真实视频常驻播放（S4 的目视验证口径）：
 
 ```sh
 cd tools/linux-spikes/AvaloniaSurfaceProbe
+
+# S3 口径：渐变 300 帧 + 统计
 LD_LIBRARY_PATH=../../../build/linux/tools/linux-spikes \
   dotnet run -- --frames 300 --rendering-mode vulkan
+
+# S4 口径：真实视频（可加 --software 强制软解、--loop 循环播放）
+LD_LIBRARY_PATH=../../../build/linux/tools/linux-spikes \
+  dotnet run -- --input /tmp/ipm_s4/phone_screen.mp4
+```
+
+测试素材按"一眼能判断对不对"合成（帧号/时间码查解码与同步，移动方块查撕裂，
+色条查色彩；正立与否直接查呈现方向）：
+
+```sh
+tools/linux-spikes/make_test_asset.sh   # 生成 /tmp/ipm_s4/phone_screen.mp4
 ```
 
 S3 的 `global.json` 与仓库根的不同（本机 SDK 10.0.111 而非 10.0.301），这是刻意的：

@@ -1,0 +1,24 @@
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+<!--
+  Linux port spike S3: managed consumer half of the Avalonia surface embedding
+  probe. Deliberately standalone: it is not referenced by build.ps1 and there is
+  no solution file, so the Windows build is unaffected.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>iPhoneMirror.Linux.AvaloniaSurfaceProbe</AssemblyName>
+    <RootNamespace>IPhoneMirror.Linux.AvaloniaSurfaceProbe</RootNamespace>
+    <PackageLicenseExpression>GPL-3.0-only</PackageLicenseExpression>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.1" />
+  </ItemGroup>
+</Project>

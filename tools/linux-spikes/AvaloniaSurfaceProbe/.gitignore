@@ -1,0 +1,4 @@
+# The repository's root .gitignore only covers src/**/bin and src/**/obj, so the
+# spike keeps its own rules rather than editing an upstream file.
+bin/
+obj/
