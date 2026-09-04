@@ -44,14 +44,12 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v7
 
-      # The default build has no third-party dependencies: the Linux spikes,
-      # which do need libusb and libplacebo, are opt-in through
-      # IPHONEMIRROR_BUILD_LINUX_SPIKES and are developer tools rather than
-      # shipped code.
+      # The portable Core source list now includes the USB transport, which
+      # links the distribution's libusb-1.0 (REQUIRED in src/Core/CMakeLists.txt).
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes ninja-build
+          sudo apt-get install --no-install-recommends --yes ninja-build libusb-1.0-0-dev pkg-config
 
       - name: Configure
         env:
