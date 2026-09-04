@@ -1,3 +1,21 @@
+# The Windows wireless host loads the vendored AirPlayServer runtime and
+# supplies its own DNS-SD shim. On Linux the receiver is built from UxPlay
+# source and DNS-SD comes from Avahi's libdns_sd, so only the policy tests in
+# this directory are platform neutral. See docs/LINUX_PORT.md.
+if(NOT WIN32)
+    if(IPHONEMIRROR_BUILD_TESTS)
+        add_executable(iPhoneMirror.DnsSdRegistrationPolicy.Tests
+            tests/DnsSdRegistrationPolicyTests.cpp)
+        target_include_directories(iPhoneMirror.DnsSdRegistrationPolicy.Tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR})
+        target_link_libraries(iPhoneMirror.DnsSdRegistrationPolicy.Tests PRIVATE
+            iPhoneMirror.CompileOptions)
+        add_test(NAME DnsSdRegistrationPolicyTests
+            COMMAND iPhoneMirror.DnsSdRegistrationPolicy.Tests)
+    endif()
+    return()
+endif()
+
 add_library(iPhoneMirror.DnsSdShim SHARED DnsSdShim.cpp DnsSdShim.def)
 target_compile_definitions(iPhoneMirror.DnsSdShim PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX

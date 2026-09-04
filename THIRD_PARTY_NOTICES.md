@@ -150,4 +150,82 @@ SHA-256 recorded in `scripts/inno-runtime-manifest.psd1`. The generated Setup
 engine is redistributed under the Inno Setup License:
 https://jrsoftware.org/files/is/license.txt
 
+# Linux port components
+
+The components in this section are used only by the Linux build of this fork.
+The Linux build vendors no prebuilt binaries: every component below is either a
+system library resolved at build time or built from upstream source. See
+`docs/LINUX_PORT.md` for the fork's modification notice.
+
+## UxPlay
+
+The Linux wireless receiver replaces the Windows-only vendored
+`airplay2dll.dll` with UxPlay's AirPlay receiver library, built from upstream
+source. UxPlay is GPL-3.0, which is compatible with this project's
+GPL-3.0-only license. UxPlay itself incorporates PlayFair (GPL-3.0) and
+llhttp (MIT); those notices travel with the UxPlay source tree.
+
+- Project: https://github.com/FDH2/UxPlay
+- License: GNU General Public License v3.0
+
+## libplacebo
+
+Used by the Linux preview renderer for NV12/P010 handling, colour management,
+PQ/HLG tone mapping and dmabuf import. Dynamically linked.
+
+- Project: https://code.videolan.org/videolan/libplacebo
+- License: GNU Lesser General Public License 2.1 or later
+
+## FFmpeg
+
+The Linux build decodes H.264/HEVC and AAC/ALAC through the distribution's
+FFmpeg libraries (`libavcodec`, `libavutil`, `libswresample`, `libswscale`)
+instead of the vendored Windows FFmpeg runtime. Dynamically linked.
+
+- Project: https://ffmpeg.org/
+- License: GNU Lesser General Public License 2.1 or later, depending on the
+  distribution's build configuration
+
+## libusb
+
+The Linux USB transport links against the distribution's libusb-1.0 rather
+than the vendored Windows headers, import library and DLL under
+`third_party/libusb/`. Dynamically linked.
+
+- Project: https://github.com/libusb/libusb
+- License: GNU Lesser General Public License 2.1 or later
+
+## Avahi
+
+DNS-SD service registration and browsing use Avahi's `libdns_sd` compatibility
+layer, which replaces this project's Windows-only `DnsSdShim`. Dynamically
+linked.
+
+- Project: https://github.com/avahi/avahi
+- License: GNU Lesser General Public License 2.1 or later
+
+## PipeWire
+
+Audio playback on Linux uses PipeWire's client library in place of WASAPI.
+Dynamically linked.
+
+- Project: https://gitlab.freedesktop.org/pipewire/pipewire
+- License: MIT
+
+## systemd libudev
+
+Linux USB device discovery uses libudev in place of SetupAPI and cfgmgr32.
+Dynamically linked.
+
+- Project: https://github.com/systemd/systemd
+- License: GNU Lesser General Public License 2.1 or later
+
+## Avalonia
+
+The Linux graphical shell replaces the Windows-only WPF and WPF-UI user
+interface with Avalonia, resolved as a NuGet dependency.
+
+- Project: https://github.com/AvaloniaUI/Avalonia
+- License: MIT
+
 All third-party components are provided without warranty.

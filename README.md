@@ -11,6 +11,22 @@
 
 <p align="center"><strong>简体中文</strong> · <a href="README.en.md">English</a></p>
 
+> [!IMPORTANT]
+> **这是一个修改版（fork）：Linux 适配分支。**
+>
+> 本仓库由 iPhoneMirror 上游项目派生并已被修改，修改自 2026-09-04 起持续进行。
+> 目标是把 USB 与 AirPlay 投屏链路适配到 Linux；上游 Windows 支持保持可编译，
+> 不做行为变更。
+>
+> - 上游项目：<https://github.com/RayrenSX/iPhoneMirror>
+> - 派生基点：`3090cafd2edf46834123193473cc3a70561e4aec`（上游 v1.8.1，2026-08-30）
+> - 修改说明与进度：[docs/LINUX_PORT.md](docs/LINUX_PORT.md)
+> - 许可不变：GNU GPL v3.0 only。本分支新增代码同样以 GPL-3.0-only 发布。
+>
+> Linux 适配尚未完成，**当前分支不产出可用的 Linux 发布包**。下方原有说明描述的
+> 是上游 Windows 版本的能力，请以 `docs/LINUX_PORT.md` 的状态表为准。
+> 本分支与上游作者无关联，问题请勿提交到上游仓库。
+
 <p align="center">
   <a href="https://github.com/RayrenSX/iPhoneMirror/releases"><img alt="GitHub Release" src="https://img.shields.io/github/v/release/RayrenSX/iPhoneMirror?include_prereleases&sort=semver"></a>
   <a href="https://github.com/RayrenSX/iPhoneMirror/actions/workflows/windows-build.yml"><img alt="Windows build" src="https://github.com/RayrenSX/iPhoneMirror/actions/workflows/windows-build.yml/badge.svg"></a>

@@ -1,0 +1,69 @@
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# Linux build validation for the Linux port fork. This only builds what is
+# actually portable today: the platform-neutral part of src/Core and the policy
+# tests. The Windows-only targets are excluded by the CMake platform guards, so
+# this job intentionally does not attempt to build the application.
+name: Linux x64 build validation
+run-name: >-
+  ${{ github.event_name == 'pull_request'
+      && format('Linux x64: build portable Core and run tests | PR #{0} | {1} -> {2}', github.event.pull_request.number, github.head_ref, github.base_ref)
+      || format('Linux x64: build portable Core and run tests | {0} | {1}', github.event_name, github.ref_name) }}
+
+on:
+  push:
+    branches: [main, linux-port]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: build-test (${{ matrix.compiler }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+          - compiler: clang
+            cc: clang
+            cxx: clang++
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+
+      # The default build has no third-party dependencies: the Linux spikes,
+      # which do need libusb and libplacebo, are opt-in through
+      # IPHONEMIRROR_BUILD_LINUX_SPIKES and are developer tools rather than
+      # shipped code.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes ninja-build
+
+      - name: Configure
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: >-
+          cmake -S . -B build/linux -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build build/linux
+
+      - name: Test
+        working-directory: build/linux
+        run: ctest --output-on-failure

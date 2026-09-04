@@ -11,6 +11,26 @@
 
 <p align="center"><a href="README.md">简体中文</a> · <strong>English</strong></p>
 
+> [!IMPORTANT]
+> **This is a modified version (fork): the Linux port branch.**
+>
+> This repository is derived from the upstream iPhoneMirror project and has been
+> modified; changes are ongoing since 2026-09-04. The goal is to port the USB and
+> AirPlay mirroring paths to Linux while keeping upstream Windows support
+> compiling with no behavior changes.
+>
+> - Upstream project: <https://github.com/RayrenSX/iPhoneMirror>
+> - Fork base: `3090cafd2edf46834123193473cc3a70561e4aec` (upstream v1.8.1, 2026-08-30)
+> - Modification notes and status: [docs/LINUX_PORT.md](docs/LINUX_PORT.md)
+> - License unchanged: GNU GPL v3.0 only. New code in this branch is also
+>   released under GPL-3.0-only.
+>
+> The Linux port is incomplete and **this branch does not yet produce a usable
+> Linux release**. The documentation below describes upstream Windows
+> capabilities; see `docs/LINUX_PORT.md` for the authoritative status table.
+> This fork is not affiliated with the upstream author; do not file its issues
+> upstream.
+
 <p align="center">
   <a href="https://github.com/RayrenSX/iPhoneMirror/releases"><img alt="GitHub Release" src="https://img.shields.io/github/v/release/RayrenSX/iPhoneMirror?include_prereleases&sort=semver"></a>
   <a href="https://github.com/RayrenSX/iPhoneMirror/actions/workflows/windows-build.yml"><img alt="Windows build" src="https://github.com/RayrenSX/iPhoneMirror/actions/workflows/windows-build.yml/badge.svg"></a>
