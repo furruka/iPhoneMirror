@@ -27,6 +27,7 @@ extern "C" {
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 using namespace iPhoneMirror;
@@ -83,11 +84,20 @@ struct PacketDeleter {
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr,
-            "usage: iPhoneMirror.Linux.DecodeProbe <input.mp4> [output.nv12]\n");
+            "usage: iPhoneMirror.Linux.DecodeProbe <input.mp4> [output.nv12] "
+            "[--hardware]\n");
         return 2;
     }
     const char* input_path = argv[1];
-    const char* output_path = argc > 2 ? argv[2] : nullptr;
+    const char* output_path{};
+    bool hardware{};
+    for (int index = 2; index < argc; ++index) {
+        if (std::string_view(argv[index]) == "--hardware") {
+            hardware = true;
+        } else {
+            output_path = argv[index];
+        }
+    }
 
     AVFormatContext* raw_context{};
     if (const int result = avformat_open_input(&raw_context, input_path, nullptr,
@@ -140,8 +150,9 @@ int main(int argc, char** argv) {
         format.nalu_length_size, format.sequence_parameter_sets.size(),
         format.picture_parameter_sets.size());
 
-    auto decoder = media::make_ffmpeg_video_decoder(
-        media::DecoderPreference::SoftwareCompatible);
+    auto decoder = media::make_ffmpeg_video_decoder(hardware
+        ? media::DecoderPreference::HardwarePreferred
+        : media::DecoderPreference::SoftwareCompatible);
     try {
         decoder->configure(format, 60, 1);
     } catch (const std::exception& error) {
@@ -149,8 +160,10 @@ int main(int argc, char** argv) {
         return 1;
     }
     const auto name = decoder->selected_decoder_name();
-    std::printf("decoder               : %.*s output=%.*s\n", IM_SV(name),
-        IM_SV(media::pixel_format_name(decoder->output_pixel_format())));
+    std::printf("decoder               : %.*s output=%.*s hardware=%s\n",
+        IM_SV(name),
+        IM_SV(media::pixel_format_name(decoder->output_pixel_format())),
+        decoder->selected_decoder_is_hardware() ? "yes" : "no");
 
     std::FILE* output = output_path != nullptr
         ? std::fopen(output_path, "wb")

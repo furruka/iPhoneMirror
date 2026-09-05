@@ -60,6 +60,7 @@ Linux 后端一律以新增文件实现。
 | P4 | FFmpeg 解码 / libplacebo 渲染 / PipeWire 音频 | `[~]` |
 | P4-WP5A | `LinuxFFmpegVideoDecoder`：libavcodec 解码 + libswscale 转 NV12/P010 | `[x]` |
 | P4-WP5B | `LinuxPipeWireAudioRenderer`：PipeWire 播放，队列策略与 WASAPI 共享 | `[x]` |
+| P4-WP5C | VAAPI 硬件解码，失败一律退回软解；与软解逐位相同 | `[x]` |
 | P5 | Avalonia GUI（P5a 最小外壳进 M1，P5b 全量对齐随后） | `[ ]` |
 | P6 | UxPlay 引擎无线接收 | `[ ]` |
 | P7 | 打包、CI、文档 | `[ ]` |
@@ -648,11 +649,43 @@ cmp out.p010 ref.p010         # 相同（20,736,000 字节 / 30 帧）
 两条都**完全相同**。这同时证明了解码、libswscale 的平面重排、以及紧凑打包的
 stride 计算都没有偏差——不是「看起来对」，是位级相同。
 
-#### 尚未做的部分
+### WP5-C：VAAPI 硬件解码（已通过，无需设备）
 
-- **硬件解码（VAAPI）** 还没接。`decoder_acceleration()` 现在诚实地返回 `Software`，
-  `selected_decoder_is_hardware()` 返回 `false`。S4 spike 已经验证过 VAAPI 路径的
-  硬件约束，接入是下一个增量。
+同一个 `LinuxFFmpegVideoDecoder`，`DecoderPreference` 不是 `SoftwareCompatible` 时尝试
+VAAPI，否则走软解。
+
+**每一条失败路径都退回软解而不是抛异常**：Linux 上没有 render node、驱动不实现这个
+codec 都是正常状态，不是拒绝解码的理由。`decoder_acceleration()` 和
+`selected_decoder_is_hardware()` 报的是**实际拿到的**东西——`get_format` 回调如果发现
+libavcodec 没给出 `AV_PIX_FMT_VAAPI`，就把状态改回 `Software`，不会谎报硬件。
+
+能力检测问 codec 自己（`avcodec_get_hw_config` + `AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX`）
+而不是猜：构建里可能根本没编 hwaccel，即使平台有 render node。
+
+VAAPI 帧在显存里，所以 `av_hwframe_transfer_data` 先取下来再做打包转换，并且补一次
+`av_frame_copy_props`——传输只搬像素不搬元数据，而色彩合并要读那些字段。
+
+#### 验收：与软解**逐位相同**
+
+```
+=== software ===
+decoder : h264 (libavcodec software, slice-threaded) output=nv12 hardware=no
+frames  : 120        first frame : 1170x2532 stride=1170 bytes=4443660
+
+=== hardware (vaapi) ===
+decoder : h264 (libavcodec vaapi) output=nv12 hardware=yes
+frames  : 120        first frame : 1170x2532 stride=1170 bytes=4443660
+```
+
+```sh
+cmp sw.nv12 hw.nv12   # 完全相同（533,239,200 字节 / 120 帧）
+```
+
+H.264 解码在规范上是逐位确定的，所以「相同」是**应该**出现的结果；它同时验证了
+hwframe 下载路径、元数据补齐和打包转换都没有引入偏差。这也意味着 WP5-A 那次与
+`ffmpeg -pix_fmt nv12` 的逐字节比对结论对硬解路径同样成立。
+
+#### 尚未做的部分
 - HEVC 走的是同一套代码，但验收素材是 High 10 的 H.264：探针只解析 `avcC`，MP4 里
   的 HEVC 参数集在 `hvcC` 里，要验 HEVC 得先给探针加 `hvcC` 解析。
 

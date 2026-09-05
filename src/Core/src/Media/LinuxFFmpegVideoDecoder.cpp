@@ -29,6 +29,7 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <format>
 #include <memory>
@@ -57,6 +58,24 @@ struct PacketDeleter {
 struct SwsDeleter {
     void operator()(SwsContext* value) const noexcept { sws_freeContext(value); }
 };
+
+struct HwDeviceDeleter {
+    void operator()(AVBufferRef* value) const noexcept { av_buffer_unref(&value); }
+};
+
+// True when this decoder advertises a VAAPI hardware configuration. Asking the
+// codec is the only reliable check: the build may lack the hwaccel even when the
+// platform has a render node.
+[[nodiscard]] bool supports_vaapi(const AVCodec& codec) noexcept {
+    for (int index = 0;; ++index) {
+        const AVCodecHWConfig* config = avcodec_get_hw_config(&codec, index);
+        if (config == nullptr) return false;
+        if (config->device_type == AV_HWDEVICE_TYPE_VAAPI &&
+            (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) != 0) {
+            return true;
+        }
+    }
+}
 
 [[nodiscard]] std::string av_error_text(int error) {
     char buffer[AV_ERROR_MAX_STRING_SIZE]{};
@@ -216,6 +235,33 @@ public:
             context->framerate.den = static_cast<int>(fps_denominator);
         }
 
+        // VAAPI when the caller asked for hardware and the platform can supply
+        // it. Every failure below falls through to software rather than throwing:
+        // a missing render node or a codec the driver does not implement is a
+        // normal state on Linux, not a reason to refuse to decode.
+        std::string acceleration_note{"software"};
+        auto acceleration = DecoderAcceleration::Software;
+        std::unique_ptr<AVBufferRef, HwDeviceDeleter> hw_device;
+        if (preference_ != DecoderPreference::SoftwareCompatible &&
+            supports_vaapi(*codec)) {
+            AVBufferRef* raw_device{};
+            const int result = av_hwdevice_ctx_create(&raw_device,
+                AV_HWDEVICE_TYPE_VAAPI, nullptr, nullptr, 0);
+            if (result < 0) {
+                acceleration_note = std::format("software, vaapi unavailable: {}",
+                    av_error_text(result));
+            } else {
+                hw_device.reset(raw_device);
+                context->hw_device_ctx = av_buffer_ref(hw_device.get());
+                if (context->hw_device_ctx == nullptr)
+                    throw std::runtime_error("av_buffer_ref failed");
+                context->opaque = this;
+                context->get_format = &FFmpegVideoDecoder::select_pixel_format;
+                acceleration = DecoderAcceleration::Hardware;
+                acceleration_note = "vaapi";
+            }
+        }
+
         if (const int result = avcodec_open2(context.get(), codec, nullptr);
             result < 0) {
             throw std::runtime_error(std::format("avcodec_open2 failed: {}",
@@ -223,14 +269,18 @@ public:
         }
 
         context_ = std::move(context);
+        hw_device_ = std::move(hw_device);
+        acceleration_.store(acceleration, std::memory_order_relaxed);
         format_ = format;
         output_format_ = format.bit_depth_luma > 8 || format.bit_depth_chroma > 8
             ? PixelFormat::P010
             : PixelFormat::Nv12;
-        decoder_name_ = std::format("{} (libavcodec {})", codec->name,
-            (context_->active_thread_type & FF_THREAD_SLICE) != 0
-                ? "slice-threaded software"
-                : "software");
+        decoder_name_ = std::format("{} (libavcodec {}{})", codec->name,
+            acceleration_note,
+            acceleration == DecoderAcceleration::Hardware ||
+                (context_->active_thread_type & FF_THREAD_SLICE) == 0
+                ? ""
+                : ", slice-threaded");
         scaler_.reset();
         scaler_source_format_ = AV_PIX_FMT_NONE;
         scaler_source_width_ = 0;
@@ -291,16 +341,53 @@ public:
         return decoder_name_;
     }
     [[nodiscard]] DecoderAcceleration decoder_acceleration() const noexcept override {
-        return DecoderAcceleration::Software;
+        return acceleration_.load(std::memory_order_relaxed);
     }
     [[nodiscard]] bool selected_decoder_is_hardware() const noexcept override {
-        return false;
+        return acceleration_.load(std::memory_order_relaxed) ==
+            DecoderAcceleration::Hardware;
     }
     [[nodiscard]] PixelFormat output_pixel_format() const noexcept override {
         return output_format_;
     }
 
 private:
+    // libavcodec asks which of the formats it can produce we want. Picking
+    // AV_PIX_FMT_VAAPI keeps the frame on the GPU; anything else means the
+    // hwaccel did not initialize and the software path is what we get.
+    static AVPixelFormat select_pixel_format(AVCodecContext* context,
+        const AVPixelFormat* formats) noexcept {
+        for (const AVPixelFormat* candidate = formats;
+            *candidate != AV_PIX_FMT_NONE; ++candidate) {
+            if (*candidate == AV_PIX_FMT_VAAPI) return *candidate;
+        }
+        if (context != nullptr && context->opaque != nullptr) {
+            static_cast<FFmpegVideoDecoder*>(context->opaque)->acceleration_.store(
+                DecoderAcceleration::Software, std::memory_order_relaxed);
+        }
+        return formats[0];
+    }
+
+    // A VAAPI frame lives in GPU memory, so it has to come down before the
+    // packing conversion can touch it. Anything else is already in system
+    // memory and is returned unchanged.
+    [[nodiscard]] const AVFrame* download(const AVFrame& source,
+        AVFrame& destination) {
+        if (source.format != AV_PIX_FMT_VAAPI) return &source;
+        if (const int result = av_hwframe_transfer_data(&destination, &source, 0);
+            result < 0) {
+            throw std::runtime_error(std::format(
+                "av_hwframe_transfer_data failed: {}", av_error_text(result)));
+        }
+        // The transfer copies pixels, not metadata, and convert() reads both.
+        if (const int result = av_frame_copy_props(&destination, &source);
+            result < 0) {
+            throw std::runtime_error(std::format("av_frame_copy_props failed: {}",
+                av_error_text(result)));
+        }
+        return &destination;
+    }
+
     void require_configured() const {
         if (!context_)
             throw std::logic_error("the decoder was used before configure()");
@@ -311,6 +398,8 @@ private:
         std::vector<DecodedFrame> frames;
         std::unique_ptr<AVFrame, FrameDeleter> frame(av_frame_alloc());
         if (!frame) throw std::runtime_error("av_frame_alloc failed");
+        std::unique_ptr<AVFrame, FrameDeleter> software(av_frame_alloc());
+        if (!software) throw std::runtime_error("av_frame_alloc failed");
         for (;;) {
             const int result = avcodec_receive_frame(context_.get(), frame.get());
             if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) break;
@@ -318,9 +407,10 @@ private:
                 throw std::runtime_error(std::format(
                     "avcodec_receive_frame failed: {}", av_error_text(result)));
             }
-            frames.push_back(convert(*frame, fallback_timestamp_100ns));
+            frames.push_back(convert(*download(*frame, *software),
+                fallback_timestamp_100ns));
             av_frame_unref(frame.get());
-        }
+            av_frame_unref(software.get());        }
         return frames;
     }
 
@@ -393,6 +483,10 @@ private:
 
     DecoderPreference preference_;
     std::unique_ptr<AVCodecContext, CodecContextDeleter> context_;
+    std::unique_ptr<AVBufferRef, HwDeviceDeleter> hw_device_;
+    // Written by the get_format callback on the decode thread and read by the
+    // capture session's stats, so it is atomic rather than a plain enum.
+    std::atomic<DecoderAcceleration> acceleration_{DecoderAcceleration::Software};
     std::unique_ptr<SwsContext, SwsDeleter> scaler_;
     AVPixelFormat scaler_source_format_{AV_PIX_FMT_NONE};
     int scaler_source_width_{};
