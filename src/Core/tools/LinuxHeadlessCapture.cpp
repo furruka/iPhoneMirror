@@ -51,12 +51,20 @@ struct Options {
     std::string audio_path{"/tmp/ipm_wp4/capture.wav"};
     std::chrono::seconds duration{15};
     bool verbose{};
+    // libusb_clear_halt sends CLEAR_FEATURE(ENDPOINT_HALT), which resets the
+    // host-side data toggle. On a freshly armed endpoint that can desynchronize
+    // the pipe from the device's own toggle, and the observable result is exactly
+    // what this tool measured: bulk IN delivers the device's first packet while
+    // every bulk OUT write times out. The Windows path clears the halt, so this
+    // switch exists to test whether Linux should.
+    bool clear_halt{true};
 };
 
 void print_usage() {
     std::fprintf(stderr,
         "usage: iPhoneMirror.Linux.HeadlessCapture --serial <udid> "
-        "[--video <path.h264>] [--audio <path.wav>] [--seconds N] [--verbose]\n");
+        "[--video <path.h264>] [--audio <path.wav>] [--seconds N] "
+        "[--no-clear-halt] [--verbose]\n");
 }
 
 std::optional<Options> parse(int argc, char** argv) {
@@ -85,6 +93,8 @@ std::optional<Options> parse(int argc, char** argv) {
             if (options.duration.count() <= 0) return std::nullopt;
         } else if (argument == "--verbose") {
             options.verbose = true;
+        } else if (argument == "--no-clear-halt") {
+            options.clear_halt = false;
         } else {
             return std::nullopt;
         }
@@ -237,25 +247,29 @@ struct RecoveryOutcome {
     // Claimed here rather than by the caller: usbmuxd re-selects a
     // configuration of its own within a few hundred milliseconds, and a claimed
     // interface is what stops it, so the claim cannot wait for the next loop.
-    std::optional<transport::QtUsbConnection> connection;
+    transport::ClaimedQuickTimeInterface connection;
 };
 
-bool try_claim(transport::QtUsbContext& context,
-    const transport::AppleUsbIdentity& identity, RecoveryOutcome& outcome) {
+// Sets the configuration and claims in one call. Splitting the two lost the race
+// to usbmuxd by 14 ms; see Transport/LinuxUsbConfiguration.h.
+bool try_claim(transport::QtUsbContext& context, std::uint8_t bus,
+    std::uint8_t address, std::uint8_t configuration, RecoveryOutcome& outcome) {
     ++outcome.claim_attempts;
-    try {
-        outcome.connection = transport::QtUsbConnection::open_quicktime(context,
-            identity, false);
+    std::string diagnostic;
+    auto claimed = transport::ClaimedQuickTimeInterface::open(context, bus, address,
+        configuration, diagnostic);
+    if (claimed.valid()) {
+        logging::write(std::format(
+            "wp4_recovery claimed attempt={} configuration_was_set={} in=0x{:02x} out=0x{:02x}",
+            outcome.claim_attempts, claimed.configuration_was_set(),
+            claimed.endpoints().bulk_in, claimed.endpoints().bulk_out));
+        outcome.connection = std::move(claimed);
         outcome.ready = true;
-        logging::write(std::format("wp4_recovery claimed attempt={}",
-            outcome.claim_attempts));
         return true;
-    } catch (const std::exception& error) {
-        logging::write(std::format("wp4_recovery claim_failed attempt={} error={}",
-            outcome.claim_attempts, error.what()));
-        outcome.connection.reset();
-        return false;
     }
+    logging::write(std::format("wp4_recovery claim_failed attempt={} error={}",
+        outcome.claim_attempts, diagnostic));
+    return false;
 }
 
 RecoveryOutcome recover_quicktime_configuration(device::UdevAppleMonitor& monitor,
@@ -331,25 +345,15 @@ RecoveryOutcome recover_quicktime_configuration(device::UdevAppleMonitor& monito
         }
 
         if (action == ReenumerationAction::SetQuickTimeConfiguration) {
-            const auto applied = sample
-                ? transport::set_active_configuration(context, sample->bus,
-                      sample->address, identity.expected_quicktime_configuration)
-                : transport::SetConfigurationResult{
-                      .applied = false,
-                      .diagnostic = "no sysfs sample for this device",
-                  };
-            logging::write(std::format(
-                "wp4_recovery set_configuration value={} attempt={} applied={} diagnostic={}",
-                identity.expected_quicktime_configuration,
-                policy.configuration_attempts(), applied.applied,
-                applied.diagnostic));
-            // Claim right away on success. Sampling again first would give the
-            // configuration away.
-            if (applied.applied && try_claim(context, identity, outcome)) break;
+            // One call: setting the configuration and then re-finding the device
+            // to claim it leaves a gap usbmuxd wins.
+            if (sample && try_claim(context, sample->bus, sample->address,
+                    identity.expected_quicktime_configuration, outcome)) break;
             continue;
         }
         if (action == ReenumerationAction::Claim) {
-            if (try_claim(context, identity, outcome)) break;
+            if (sample && try_claim(context, sample->bus, sample->address,
+                    identity.expected_quicktime_configuration, outcome)) break;
             // Another process holds the interface. Keep sampling until the
             // deadline rather than declaring failure on one lost race.
             continue;
@@ -373,9 +377,8 @@ RecoveryOutcome recover_quicktime_configuration(device::UdevAppleMonitor& monito
 // Opens the QuickTime endpoint, runs the upstream handshake state machine and
 // writes every sample it yields to disk. The protocol side is the shared
 // SessionProtocol, so a success here also proves the handshake works on Linux.
-int stream_to_disk(transport::QtUsbContext& context,
-    const transport::AppleUsbIdentity& identity, const Options& options,
-    transport::QtUsbConnection connection) {
+int stream_to_disk(const Options& options,
+    transport::ClaimedQuickTimeInterface connection) {
     std::error_code directory_error;
     std::filesystem::create_directories(
         std::filesystem::path(options.video_path).parent_path(), directory_error);
@@ -387,21 +390,22 @@ int stream_to_disk(transport::QtUsbContext& context,
     }
     WavWriter audio;
 
-    if (const auto described = context.find_apple_device(identity, true)) {
-        const auto& endpoints = described->quicktime_endpoints;
+    {
+        const auto& endpoints = connection.endpoints();
         std::printf("endpoints             : config=%u interface=%u alt=%u "
                     "in=0x%02x out=0x%02x in_packet=%u out_packet=%u\n",
             endpoints.configuration, endpoints.interface_number,
             endpoints.alternate_setting, endpoints.bulk_in, endpoints.bulk_out,
             endpoints.bulk_in_packet_size, endpoints.bulk_out_packet_size);
+        std::printf("configuration_was_set : %s\n",
+            connection.configuration_was_set() ? "yes" : "no (already active)");
     }
 
-    try {
-        connection.clear_halt();
-        std::printf("clear_halt            : ok\n");
-    } catch (const std::exception& error) {
-        std::printf("clear_halt            : failed (%s)\n", error.what());
-    }
+    // clear_halt is deliberately not issued: CLEAR_FEATURE(ENDPOINT_HALT) resets
+    // the host-side data toggle, and on a freshly armed endpoint that can leave
+    // the OUT pipe out of step with the device. The Windows path needs it for the
+    // libusb-win32 backend; nothing here does.
+    std::printf("clear_halt            : not issued on Linux\n");
 
     quicktime::SessionOptions session_options;
     session_options.demo_mode = true;
@@ -419,14 +423,15 @@ int stream_to_disk(transport::QtUsbContext& context,
     const auto deadline = Clock::now() + options.duration;
     auto next_ping = Clock::now() + std::chrono::seconds(3);
     std::uint64_t ping_attempts{};
+    std::uint64_t outbound_written{};
+    std::uint64_t outbound_failed{};
     bool ping_sent{};
 
     while (Clock::now() < deadline) {
-        std::size_t count{};
-        try {
-            count = connection.read(read_buffer, 250);
-        } catch (const std::exception& error) {
-            std::fprintf(stderr, "bulk read failed: %s\n", error.what());
+        std::string io_diagnostic;
+        const auto count = connection.read(read_buffer, 250, io_diagnostic);
+        if (!io_diagnostic.empty()) {
+            std::fprintf(stderr, "bulk read failed: %s\n", io_diagnostic.c_str());
             break;
         }
         if (count != 0) {
@@ -451,23 +456,21 @@ int stream_to_disk(transport::QtUsbContext& context,
                 ++ping_attempts;
                 if (!ping_sent) {
                     ping_sent = true;
-                    try {
-                        connection.recover_handshake();
-                        std::printf("recover_handshake     : ok\n");
-                    } catch (const std::exception& error) {
-                        std::printf("recover_handshake     : failed (%s)\n",
-                            error.what());
-                    }
+                    std::string kick_diagnostic;
+                    const bool kicked = connection.kick_handshake(kick_diagnostic);
+                    std::printf("handshake kick        : %s\n",
+                        kicked ? "ok" : kick_diagnostic.c_str());
                 }
-                try {
-                    connection.write(quicktime::make_ping(), 1000);
+                std::string write_diagnostic;
+                if (connection.write(quicktime::make_ping(), 1000,
+                        write_diagnostic)) {
                     if (ping_attempts <= 2) {
                         std::printf("ping write            : ok (attempt %llu)\n",
                             static_cast<unsigned long long>(ping_attempts));
                     }
-                } catch (const std::exception& error) {
+                } else if (ping_attempts <= 3) {
                     std::printf("ping write            : failed (%s)\n",
-                        error.what());
+                        write_diagnostic.c_str());
                 }
             }
             continue;
@@ -483,7 +486,18 @@ int stream_to_disk(transport::QtUsbContext& context,
                 goto finished;
             }
             for (const auto& response : event.outbound) {
-                try { connection.write(response, 1000); } catch (...) {}
+                // Reported rather than swallowed: the device answering while the
+                // host cannot answer back is the exact failure being diagnosed.
+                std::string write_diagnostic;
+                if (connection.write(response, 1000, write_diagnostic)) {
+                    ++outbound_written;
+                } else {
+                    ++outbound_failed;
+                    if (outbound_failed <= 3) {
+                        std::printf("outbound write        : failed (%zu bytes, %s)\n",
+                            response.size(), write_diagnostic.c_str());
+                    }
+                }
             }
             if (event.state != last_state) {
                 last_state = event.state;
@@ -527,12 +541,10 @@ finished:
     // Every exit path must send the same HPA0/HPD0 stop controls the working
     // clients send, then restore the normal configuration.
     for (const auto& message : protocol.stop_messages()) {
-        try { connection.write(message, 500); } catch (...) {}
+        std::string ignored;
+        (void)connection.write(message, 500, ignored);
     }
-    const bool normal_requested = [&] {
-        try { return connection.request_normal_configuration(); }
-        catch (...) { return false; }
-    }();
+    const bool normal_requested = connection.request_normal_configuration();
     connection.close();
 
     video.close();
@@ -545,6 +557,9 @@ finished:
     std::printf("audio                 : %s packets=%llu bytes=%zu\n",
         options.audio_path.c_str(),
         static_cast<unsigned long long>(audio_packets), audio.data_bytes());
+    std::printf("outbound writes       : ok=%llu failed=%llu\n",
+        static_cast<unsigned long long>(outbound_written),
+        static_cast<unsigned long long>(outbound_failed));
     std::printf("ping attempts         : %llu\n",
         static_cast<unsigned long long>(ping_attempts));
     std::printf("bulk reads            : with_data=%llu bytes=%llu packets=%llu\n",
@@ -615,6 +630,47 @@ int main(int argc, char** argv) {
             identity.expected_quicktime_configuration != 0 &&
             device->active_configuration ==
                 identity.expected_quicktime_configuration;
+
+        // iOS arms the Valeria endpoints only for a short window after the
+        // configuration switch, and 0x52 wIndex=2 is a no-op once the
+        // configuration is already exposed. Measured on an iPhone 16 Pro: the
+        // extra configuration survives unplugging the cable, so the only way to
+        // reach a fresh window is to disable first and let the device
+        // re-enumerate without it.
+        if (!quicktime_active && device->quicktime_configuration) {
+            std::printf("disabling the QuickTime configuration first "
+                        "(0x52 wIndex=0) so a fresh window can open\n");
+            bool disable_acknowledged{};
+            try {
+                disable_acknowledged =
+                    transport::QtUsbConnection::disable_quicktime_configuration(
+                        preflight, identity);
+            } catch (const std::exception& error) {
+                std::printf("0x52 wIndex=0         : threw (%s)\n", error.what());
+            }
+            std::printf("0x52 wIndex=0         : %s\n",
+                disable_acknowledged ? "acknowledged" : "not acknowledged");
+            // Wait for the device to come back without the extra configuration.
+            const auto reset_deadline = Clock::now() + std::chrono::seconds(15);
+            bool reset_seen{};
+            while (Clock::now() < reset_deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                bool present{};
+                for (const auto& candidate : monitor.enumerate()) {
+                    if (!transport::apple_usb_serial_equal(candidate.serial,
+                            identity.serial)) continue;
+                    present = true;
+                    if (candidate.configuration_count <
+                        identity.expected_quicktime_configuration) {
+                        reset_seen = true;
+                    }
+                }
+                if (reset_seen && present) break;
+            }
+            std::printf("configuration reset   : %s\n",
+                reset_seen ? "yes" : "no (the extra configuration is still there)");
+        }
+
         if (!quicktime_active) {
             // 0x52 with wIndex=2 asks iOS to expose the hidden capture
             // configuration and detaches the device. Sent even when the
@@ -650,9 +706,8 @@ int main(int argc, char** argv) {
                     "39-usbmuxd.rules is active on this device\n",
             recovery.configuration_overwrites);
     }
-    if (!recovery.ready || !recovery.connection) return 1;
+    if (!recovery.ready || !recovery.connection.valid()) return 1;
 
-    return stream_to_disk(context, identity, *options,
-        std::move(*recovery.connection));
+    return stream_to_disk(*options, std::move(recovery.connection));
 }
 

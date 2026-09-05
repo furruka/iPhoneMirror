@@ -272,6 +272,55 @@ Windows 上这件事由 Apple 的 usbmux 驱动在同一配置内完成；Linux 
 
 以上结论均基于 **iPadOS 27 Beta 4**，未在正式版或 iPhone 上复核。
 
+#### iPhone 16 Pro 实测（iOS 27 Beta 4）：设备发了 PING
+
+设备 `05ac:12a8`，udid `00008140-00046DE20111801C`。0x52 生效后新增配置 5
+`PTP + Apple Mobile Device + Valeria`，其 interface 2（`0xFF/0x2A`）端点是
+**in=0x86 / out=0x05**（iPad 上是 0x84/0x03，所以端点号必须从描述符读，不能写死）。
+
+**关键突破**：在「0x52 → 重枚举 → set config 5 → claim」这一序列刚走完的那次运行里：
+
+```
+handshake state       : 1        ← 从 WaitingForPing 前进
+bulk reads            : with_data=1 bytes=16 packets=1
+```
+
+16 字节正是参考文档描述的 PING 包（magic `676E6970` = "ping"）。**设备主动发了
+PING，本项目的 QuickTime 解析器在 Linux 上解得对，协议状态机前进了。**
+iPad Air M3 从未发过 PING。
+
+由此确认：**iOS 只在配置切换后的一小段窗口内武装 Valeria 端点。** 配置 5 处于
+陈旧的已激活状态时，设备一个字节都不发。
+
+#### 竞争窗口只有 14 ms，set 与 claim 必须原子
+
+带 usbmuxd 运行时的精确时序：
+
+```
+14:51:18.391  我们 set_configuration(5)     → applied=true
+14:51:18.405  我们 claim_interface(2)       → LIBUSB_ERROR_BUSY
+14:51:18.406  usbmuxd: Connected to v2.0 device 1
+```
+
+那 14 ms 花在共享的 open 路径上——它枚举每个 Apple 设备并逐个打开读序列号。
+于是新增 `Transport/LinuxUsbConfiguration` 的 `ClaimedQuickTimeInterface`：
+在**同一个 handle** 上完成 open → set_configuration → 从活动配置描述符定位
+`0xFF/0x2A` 接口 → claim，中间不做任何重枚举。它自带 bulk 读写与控制请求，
+故意不建立在 `QtUsbConnection` 之上，因为后者的 open 路径正是输掉竞争的原因。
+
+另外 Linux 上**不再发 `clear_halt`**：`CLEAR_FEATURE(ENDPOINT_HALT)` 会重置主机侧
+data toggle，对刚武装的端点可能让 OUT 管道与设备错开。Windows 侧为 libusb-win32
+后端保留该调用。
+
+#### 仍未解决
+
+1. **bulk OUT 写恒为 `LIBUSB_ERROR_TIMEOUT`**，包括收到 PING 那一次。IN 通 OUT 不通
+   的单向失败原因未定。
+2. **拿不到可重复的武装窗口**。`0x52 wIndex=2` 在配置 5 已存在时是空操作；
+   `0x52 wIndex=0` 虽然回 acknowledged，但 15 秒内配置 5 不消失（更早的一次是几分钟
+   后才消失），拔插数据线也不会让 iPhone 回到 4 个配置。所以「先 disable 再 enable」
+   这条软件路径目前不可靠。
+
 P1 的构建结论：`src/Core` 的 5 个可移植翻译单元（Protocol / Media / CoreMedia / H264）
 在 GCC 16.2 与 Clang 22.1 下都能构建出 `libiPhoneMirror.Core.so`，`ctest` 3/3 通过
 （`OutputModeStateTests`、`UsbConfigurationRestorePolicyTests`、
