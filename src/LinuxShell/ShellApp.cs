@@ -88,9 +88,19 @@ internal sealed class ShellApp : Application
             DisplayedWidth = _width,
             DisplayedHeight = _height,
         };
-        _ = hid.StartAsync("iPhoneMirror Linux").ContinueWith(task =>
-            Console.WriteLine($"reverse control : {(task.Result ? "ready" : hid.Diagnostic)}"),
-            TaskScheduler.Default);
+        // Task.Run, not a bare call: Tmds.DBus captures the synchronization
+        // context in effect when the connection is made, and starting this from
+        // the UI thread made every incoming BlueZ call — every characteristic
+        // read, every notification bookkeeping step — run on the UI thread. That
+        // starved the timer presenting frames, so the picture froze a few frames
+        // in even with no mouse input at all. A thread-pool thread has no
+        // synchronization context, so the D-Bus work stays off the UI thread.
+        _ = Task.Run(async () =>
+        {
+            var ready = await hid.StartAsync("iPhoneMirror Linux");
+            Console.WriteLine(
+                $"reverse control : {(ready ? "ready" : hid.Diagnostic)}");
+        });
 
         preview.PointerMoved += (_, e) => bridge.PointerMoved(e.GetPosition(preview));
         preview.PointerExited += (_, _) => bridge.PointerLost();
@@ -104,7 +114,11 @@ internal sealed class ShellApp : Application
         preview.PointerWheelChanged += (_, e) => bridge.Wheel(e.Delta.Y);
         window.KeyDown += (_, e) => bridge.KeyChanged(e.Key, true, e.KeyModifiers);
         window.KeyUp += (_, e) => bridge.KeyChanged(e.Key, false, e.KeyModifiers);
-        window.Closed += (_, _) => _ = hid.DisposeAsync();
+        window.Closed += (_, _) =>
+        {
+            bridge.Dispose();
+            _ = hid.DisposeAsync();
+        };
     }
 
     private static int ButtonIndex(PointerPoint point) =>
