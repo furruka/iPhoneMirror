@@ -565,14 +565,27 @@ interface 1 上有一个活着的 mux 会话**，而 usbmuxd 1.1.1 不会这么�
 线上要做的是：USBMUX 自己的版本握手 → 类 TCP 通道连到 lockdown 的 62078 端口 → 用
 `/var/lib/lockdown` 里的 pair record 做 TLS。这是一整套协议栈，不是探针。
 
-#### 一个一直被假设掉的前提：没人验证过 Windows 在这台设备、这个系统版本上能用
+#### Windows 基线已实测：同一台设备、同一个系统版本，Windows 能出画
 
-「Windows 就可以」是对上游产品在**某个** iOS 版本上的印象，不是在 iPad Air M3 /
-iPadOS 27 Beta 4 上的实测。iOS 27 是 beta，如果 Apple 改了 Valeria 握手，Windows 同样
-会停在这里。**在为 lockdown 栈投入之前，先确认 Windows 基线**是更便宜的判据：
+星翼在 Windows 机器上用上游 release 插同一台 iPad Air M3（iPadOS 27 Beta 4）实测
+**可以镜像并控制**（附带观察：数据线接触不太稳，容易掉）。
 
-- Windows 上也停 → 原因是 iOS 27，与 Linux 移植无关。
-- Windows 上正常 → 差异确实是环境性的，lockdown 那条路才值得走。
+**这条排除了「iPadOS 27 改了 Valeria 握手」**，也就是说问题不在协议本身，更不在
+`CaptureSession.cpp` / `QuickTimeSession.cpp`——那两个文件两平台**共用同一份**，
+Windows 上它们工作正常。差异只可能在 Linux 侧的传输环境里。
+
+于是范围收窄成两条：
+
+1. **总线上还有谁。** Windows 走的是 AppleUsbFilter + libusb0 过滤驱动路径，AMDS 的
+   lockdown 会话与我们的采集**同时存在**——过滤驱动在底层，两边都能说话。Linux 上
+   `libusb_claim_interface` 是排他的，usbmuxd 被彻底挤出去（它甚至直接放弃设备）。
+   这正是那条 lockdown 假设，现在它是首选。
+2. **后端差异本身。** 上游 Windows 默认走 libusb0 过滤后端；代码注释也写了
+   「libusb1/UsbDk 需要显式 clear halt，libusb0 过滤后端历史上不需要」。
+
+**下一步不该靠猜：Windows 上抓一份 USB trace。** 那份 trace 会直接给出 ping 交换之后
+主机到底发了什么、interface 1 上有没有 lockdown 流量。有了它就不需要反推协议；没有它
+就是在一个未验证的假设上写一整套 lockdown 栈。
 
 #### 迭代成本
 
