@@ -23,7 +23,16 @@ internal static class Program
     private static int Main(string[] arguments)
     {
         if (arguments.Length >= 1 && arguments[0] == "--hid-probe")
-            return RunHidProbe(arguments.Length >= 2 ? arguments[1] : "iPhoneMirror");
+            return RunHidProbe(arguments.Length >= 2 ? arguments[1] : "iPhoneMirror", 8);
+        if (arguments.Length >= 1 && arguments[0] == "--hid-test")
+            return RunHidTest();
+        if (arguments.Length >= 1 && arguments[0] == "--hid-serve")
+        {
+            var seconds = arguments.Length >= 3 && int.TryParse(arguments[2], out var s)
+                ? s : 240;
+            return RunHidProbe(
+                arguments.Length >= 2 ? arguments[1] : "iPhoneMirror Linux", seconds);
+        }
         if (arguments.Length >= 2 && arguments[0] == "--device")
         {
             return RunDevice(arguments[1],
@@ -96,20 +105,85 @@ internal static class Program
     // tears it down. No window and no iPad: this checks our own D-Bus objects,
     // which is a different thing from the earlier Python probes checking whether
     // BlueZ would accept any such application at all.
-    private static int RunHidProbe(string name)
+    private static int RunHidProbe(string name, int seconds)
     {
         return Task.Run(async () =>
         {
             await using var service = new Services.BluezHidService();
+            service.ReportSubscriptionChanged += (report, subscribed) =>
+                Console.WriteLine(
+                    $"report {report}: {(subscribed ? "subscribed" : "unsubscribed")}"
+                    + " — iOS has attached to the HID service");
             var started = await service.StartAsync(name);
             Console.WriteLine($"bluez hid register : {(started ? "ok" : "failed")}");
             Console.WriteLine($"diagnostic         : {service.Diagnostic}");
             if (!started) return 1;
-            // Long enough for bluetoothctl to show the advertisement, short
-            // enough not to leave the adapter advertising after the probe.
-            await Task.Delay(TimeSpan.FromSeconds(8));
-            Console.WriteLine("held 8s, tearing down");
-            return 0;
+            Console.WriteLine($"holding {seconds}s — pair from the device now");
+            for (var elapsed = 0; elapsed < seconds; elapsed += 5)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(5));
+                Console.WriteLine($"  t={elapsed + 5}s subscribed={service.AnySubscribed}");
+            }
+            Console.WriteLine("tearing down");
+            return service.AnySubscribed ? 0 : 2;
+        }).GetAwaiter().GetResult();
+    }
+
+    // Sends actual mouse movement once iOS has subscribed. This is the payoff
+    // check: pairing and subscription only prove iOS accepted the descriptor,
+    // not that a report moves anything.
+    //
+    // HOGP puts the report ID in the Report Reference descriptor, not in the
+    // value, so the payload is the report body alone: buttons, then X and Y as
+    // 16-bit signed, then the wheel.
+    private static int RunHidTest()
+    {
+        return Task.Run(async () =>
+        {
+            await using var service = new Services.BluezHidService();
+            if (!await service.StartAsync("iPhoneMirror Linux"))
+            {
+                Console.WriteLine($"start failed: {service.Diagnostic}");
+                return 1;
+            }
+            Console.WriteLine($"diagnostic : {service.Diagnostic}");
+            for (var wait = 0; wait < 60 && !service.AnySubscribed; ++wait)
+                await Task.Delay(TimeSpan.FromSeconds(1));
+            if (!service.AnySubscribed)
+            {
+                Console.WriteLine("no subscriber; connect the device and retry");
+                return 2;
+            }
+            Console.WriteLine("subscribed — moving the pointer in a square");
+
+            var sent = 0;
+            // Allocated once: CA2014 rightly objects to stackalloc in a loop, and
+            // a six-byte report does not need a fresh buffer per tick anyway.
+            var report = new byte[6];
+            var steps = new (short X, short Y)[]
+            {
+                (24, 0), (0, 24), (-24, 0), (0, -24),
+            };
+            for (var lap = 0; lap < 20; ++lap)
+            {
+                foreach (var step in steps)
+                {
+                    for (var repeat = 0; repeat < 10; ++repeat)
+                    {
+                        report[0] = 0;
+                        BitConverter.TryWriteBytes(report.AsSpan(1, 2), step.X);
+                        BitConverter.TryWriteBytes(report.AsSpan(3, 2), step.Y);
+                        report[5] = 0;
+                        if (service.SendReport(
+                                Services.HidReportMap.MouseReportId, report))
+                            ++sent;
+                        await Task.Delay(16);
+                    }
+                }
+                if (lap % 5 == 0) Console.WriteLine($"  lap {lap}, {sent} reports sent");
+            }
+            Console.WriteLine($"done: {sent} mouse reports sent");
+            return sent > 0 ? 0 : 3;
         }).GetAwaiter().GetResult();
     }
 }

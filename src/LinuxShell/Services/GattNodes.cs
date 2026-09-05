@@ -27,6 +27,11 @@ internal sealed class GattCharacteristicNode(ObjectPath path,
 
     internal bool Notifying { get; private set; }
 
+    // Raised when the peer subscribes or unsubscribes. That transition is the
+    // only reliable sign iOS has accepted the HID service, so it is surfaced
+    // rather than kept private.
+    internal Action<bool>? NotifyingChanged { get; init; }
+
     public Task<byte[]> ReadValueAsync(IDictionary<string, object> options) =>
         Task.FromResult(Properties.TryGetValue("Value", out var value)
             ? (byte[])value
@@ -42,6 +47,7 @@ internal sealed class GattCharacteristicNode(ObjectPath path,
     {
         Notifying = true;
         Publish("Notifying", true);
+        NotifyingChanged?.Invoke(true);
         return Task.CompletedTask;
     }
 
@@ -49,6 +55,7 @@ internal sealed class GattCharacteristicNode(ObjectPath path,
     {
         Notifying = false;
         Publish("Notifying", false);
+        NotifyingChanged?.Invoke(false);
         return Task.CompletedTask;
     }
 }

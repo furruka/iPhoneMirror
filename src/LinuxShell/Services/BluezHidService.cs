@@ -43,10 +43,19 @@ internal sealed class BluezHidService : IObjectManager, IAsyncDisposable
     private readonly Advertisement _advertisement = new();
     private ObjectPath _adapter = new("/org/bluez/hci0");
     private bool _registered;
+    private bool _restoreDiscoverable;
+    private bool _restorePairable;
 
     public ObjectPath ObjectPath => Root;
 
     internal string Diagnostic { get; private set; } = "not started";
+
+    // Fired when a report characteristic gains or loses a subscriber, which is
+    // how the host learns iOS has actually attached to the HID service.
+    internal event Action<byte, bool>? ReportSubscriptionChanged;
+
+    internal bool AnySubscribed =>
+        _reports.Values.Any(report => report.Notifying);
 
     internal async Task<bool> StartAsync(string localName = "iPhoneMirror")
     {
@@ -58,6 +67,16 @@ internal sealed class BluezHidService : IObjectManager, IAsyncDisposable
             await _connection.RegisterObjectAsync(this);
             foreach (var entry in _objects)
                 await _connection.RegisterObjectAsync(entry);
+
+            // Pairing needs the adapter powered, pairable and discoverable. This
+            // is the same state any Bluetooth settings panel puts it in, and it is
+            // restored on dispose.
+            var adapter = _connection.CreateProxy<IAdapter1>(Bluez, _adapter);
+            _restoreDiscoverable = (bool)await adapter.GetAsync("Discoverable");
+            _restorePairable = (bool)await adapter.GetAsync("Pairable");
+            await adapter.SetAsync("Powered", true);
+            await adapter.SetAsync("Pairable", true);
+            await adapter.SetAsync("Discoverable", true);
 
             var manager = _connection.CreateProxy<IGattManager1>(Bluez, _adapter);
             await manager.RegisterApplicationAsync(Root,
@@ -132,6 +151,16 @@ internal sealed class BluezHidService : IObjectManager, IAsyncDisposable
                 // exiting and BlueZ drops the registration when the name goes.
                 Diagnostic = $"teardown: {error.Message}";
             }
+            try
+            {
+                var adapter = _connection.CreateProxy<IAdapter1>(Bluez, _adapter);
+                await adapter.SetAsync("Discoverable", _restoreDiscoverable);
+                await adapter.SetAsync("Pairable", _restorePairable);
+            }
+            catch (Exception error)
+            {
+                Diagnostic = $"adapter restore: {error.Message}";
+            }
             _registered = false;
         }
         _connection.Dispose();
@@ -169,8 +198,10 @@ internal sealed class BluezHidService : IObjectManager, IAsyncDisposable
             HidReportMap.NavigationReportId,
         })
         {
+            var id = reportId;
             var characteristic = AddCharacteristic(service, index, ReportUuid,
-                ["read", "notify"], []);
+                ["read", "notify"], [],
+                subscribed => ReportSubscriptionChanged?.Invoke(id, subscribed));
             _reports[reportId] = characteristic;
             _objects.Add(new GattDescriptorNode(
                 characteristic.ObjectPath + "/desc0",
@@ -187,7 +218,8 @@ internal sealed class BluezHidService : IObjectManager, IAsyncDisposable
     }
 
     private GattCharacteristicNode AddCharacteristic(ObjectPath service,
-        byte index, string uuid, string[] flags, byte[] value)
+        byte index, string uuid, string[] flags, byte[] value,
+        Action<bool>? subscribed = null)
     {
         var node = new GattCharacteristicNode(service + $"/char{index}",
             new Dictionary<string, object>
@@ -197,7 +229,10 @@ internal sealed class BluezHidService : IObjectManager, IAsyncDisposable
                 ["Flags"] = flags,
                 ["Value"] = value,
                 ["Notifying"] = false,
-            });
+            })
+        {
+            NotifyingChanged = subscribed,
+        };
         _objects.Add(node);
         return node;
     }

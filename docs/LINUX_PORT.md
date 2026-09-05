@@ -1396,6 +1396,36 @@ localization。
 重复而不是链接，理由写在文件头：WPF 工程在 Linux 上编不了，把它抽出来就等于**改一个本侧
 无法编译验证的文件**。那次抽取应该是一个由 Windows CI 验证的独立改动。
 
+##### 真机实测：iOS 接受了这套描述符，四个报告全部被订阅
+
+星翼在 iPad 上配对成功。BlueZ 侧：
+
+```
+dev_77_D2_EB_76_9A_75  name="iPad (3)"  paired=true  connected=true
+```
+
+而**决定性的判据不是配对成功，是订阅**——配上蓝牙只说明 iOS 认了这台设备，订阅才说明它
+解析了我们的报告映射并启用了通知：
+
+```
+report 1: subscribed — iOS has attached to the HID service   ← 键盘
+report 2: subscribed                                          ← 鼠标
+report 4: subscribed                                          ← Consumer
+report 5: subscribed                                          ← 导航
+```
+
+**四个输入报告全部订阅**，说明整份报告描述符被 iOS 完整接受，不只是其中一部分。
+
+然后发真报告（`--hid-test`，鼠标画方框）：
+
+```
+subscribed — moving the pointer in a square
+done: 800 mouse reports sent
+```
+
+HOGP 的报告值里**不含 report ID**——ID 由 Report Reference 描述符携带，所以鼠标载荷是
+6 字节：按钮、X（16 位有符号）、Y、滚轮。这一点搞错的话 iOS 会静默丢弃报告。
+
 ##### 剩下的是真机闸门
 
 `Appearance` 用 `0x03C1`（Keyboard）。Feature report（id 3）**故意没导出**——目前没有任何
