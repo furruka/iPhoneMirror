@@ -316,14 +316,59 @@ iPad Air M3 从未发过 PING。
 `0xFF/0x2A` 接口 → claim，中间不做任何重枚举。它自带 bulk 读写与控制请求，
 故意不建立在 `QtUsbConnection` 之上，因为后者的 open 路径正是输掉竞争的原因。
 
-另外 Linux 上**不再发 `clear_halt`**：`CLEAR_FEATURE(ENDPOINT_HALT)` 会重置主机侧
-data toggle，对刚武装的端点可能让 OUT 管道与设备错开。Windows 侧为 libusb-win32
-后端保留该调用。
+另外 Linux 上曾一度**不发 `clear_halt`**，理由是 `CLEAR_FEATURE(ENDPOINT_HALT)`
+会重置主机侧 data toggle、对刚武装的端点可能让 OUT 管道与设备错开。**该判断已被
+参考实现推翻并撤回**，见下面的逐项对照。现在两个端点都发，`--no-clear-halt`
+保留作对照开关。
+
+#### 与参考实现的逐项对照（`quicktime_video_hack`）
+
+一次离线对照，用来判断我们是不是漏了序列里的某一步。三条结论，其中两条推翻了
+我自己先前的判断。
+
+**① `0x52` 的 wLength 假设是错的，作废。** 我先前提出「参考实现传了 data 缓冲区、
+我们传 `nullptr, 0`，wLength 不同」。查了源码：参考实现两条路都是
+`response := make([]byte, 0)`——**零长度切片，wLength 也是 0，和我们完全一致**。
+
+```go
+val, err := device.Control(0x40, 0x52, 0x00, 0x02, response)  // enable
+val, err := device.Control(0x40, 0x52, 0x00, 0x00, response)  // disable
+```
+
+**② 参考实现的 disable 是个 20 次循环**，每次之后重新选一次 usbmux 配置；enable
+只发一次。这和我们实测「disable 立刻 acknowledged，但配置要一分钟量级才消失」
+互相印证：对方是拿重试把这段延迟磨掉的。
+
+**③ 参考实现对两个端点都发 `CLEAR_FEATURE(ENDPOINT_HALT)`**，而且这是它开始
+streaming 之前**唯一**的控制传输：
+
+```go
+usbDevice.Control(0x02, 0x01, 0, uint16(inboundBulkEndpointAddress), make([]byte, 0))
+// 出向端点同样一次
+```
+
+`0x02` = host→device / standard / **endpoint recipient**，正是 `libusb_clear_halt`
+发的那条请求。
+
+**这条推翻了我先前「Linux 上不发 clear_halt」的改动。** 那个改动基于一条
+HYPOTHESIS（重置 data toggle 会让刚武装的 OUT 管道和设备错开），而一个跑得通的
+实现做的恰好相反，且把它放在 streaming 前的必经路径上。已恢复，默认发，保留
+`--no-clear-halt` 供真机 A/B。
+
+**由此得到 OUT 超时的首选假设（HYPOTHESIS，未验证）**：data toggle 不同步。
+如果端点是 STALL，libusb 会返回 `LIBUSB_ERROR_PIPE`；我们拿到的是
+`LIBUSB_ERROR_TIMEOUT`，而 toggle 错位的表现正是设备一直 NAK、主机重试到超时。
+`CLEAR_FEATURE(ENDPOINT_HALT)` 会把两侧 toggle 都复位成 DATA0——这是主机唯一能
+同步一个自己读不到的 toggle 的手段。**验证需要一台会武装 Valeria 的设备。**
+
+对照里确认一致、不用改的部分：按 subclass 找接口而不是按 index；alt setting 在
+claim 时就选 0，没有单独的 SET_INTERFACE；主机被动等 ping，不先发；读帧是 4 字节
+小端长度前缀且**长度含自身**（所以 payload 是 `length - 4`）。
 
 #### 仍未解决
 
-1. **bulk OUT 写恒为 `LIBUSB_ERROR_TIMEOUT`**，包括收到 PING 那一次。IN 通 OUT 不通
-   的单向失败原因未定。**只能在会武装 Valeria 的设备（iPhone）上继续调。**
+1. **bulk OUT 写恒为 `LIBUSB_ERROR_TIMEOUT`**，包括收到 PING 那一次。首选假设见
+   上面的 ③。**只能在会武装 Valeria 的设备（iPhone）上继续调。**
 2. **iPad Air M3 不武装 Valeria。** 见下方受控实验。
 
 #### 受控实验：所有变量都控住之后，iPad 仍然零字节
@@ -336,7 +381,7 @@ data toggle，对刚武装的端点可能让 OUT 管道与设备错开。Windows
 | usbmuxd | `systemctl mask` + stop，**无竞争** |
 | 屏幕 | 已解锁亮屏（用户确认） |
 | set + claim | 原子完成，`set_attempts=1 claim_attempts=1 configuration_was_set=yes` |
-| `clear_halt` | 不发 |
+| `clear_halt` | 不发（此轮如此；该决定后来被撤回） |
 | 握手时序 | 等设备先发 PING |
 
 结果：`bulk reads: with_data=0 bytes=0 packets=0`，30 秒零字节。

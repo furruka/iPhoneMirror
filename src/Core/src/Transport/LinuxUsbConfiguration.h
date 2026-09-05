@@ -73,6 +73,14 @@ public:
         unsigned timeout_ms, std::string& diagnostic) noexcept;
     [[nodiscard]] bool write(std::span<const std::uint8_t> source,
         unsigned timeout_ms, std::string& diagnostic) noexcept;
+    // CLEAR_FEATURE(ENDPOINT_HALT) on both bulk endpoints.
+    //
+    // Not a recovery step. The reference client (quicktime_video_hack) sends
+    // exactly this on both endpoints and it is the only control traffic it sends
+    // before streaming, so it belongs to the expected startup sequence.
+    // CLEAR_FEATURE(ENDPOINT_HALT) also resets the data toggle to DATA0 on both
+    // sides, which is the only way a host can synchronize a toggle it cannot read.
+    [[nodiscard]] bool clear_halt(std::string& diagnostic) noexcept;
     // Vendor control request the reference clients send when a freshly activated
     // endpoint has not started talking.
     [[nodiscard]] bool kick_handshake(std::string& diagnostic) noexcept;

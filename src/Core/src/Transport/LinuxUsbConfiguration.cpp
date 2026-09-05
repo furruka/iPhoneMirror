@@ -276,6 +276,24 @@ bool ClaimedQuickTimeInterface::write(std::span<const std::uint8_t> source,
     return true;
 }
 
+bool ClaimedQuickTimeInterface::clear_halt(std::string& diagnostic) noexcept {
+    if (handle_ == nullptr) return false;
+    const int in_result = libusb_clear_halt(handle_, endpoints_.bulk_in);
+    if (in_result != LIBUSB_SUCCESS) {
+        diagnostic = std::format("libusb_clear_halt(in 0x{:02x}): {}",
+            endpoints_.bulk_in, libusb_error_name(in_result));
+        return false;
+    }
+    const int out_result = libusb_clear_halt(handle_, endpoints_.bulk_out);
+    if (out_result != LIBUSB_SUCCESS) {
+        diagnostic = std::format("libusb_clear_halt(out 0x{:02x}): {}",
+            endpoints_.bulk_out, libusb_error_name(out_result));
+        return false;
+    }
+    diagnostic.clear();
+    return true;
+}
+
 bool ClaimedQuickTimeInterface::kick_handshake(std::string& diagnostic) noexcept {
     if (handle_ == nullptr) return false;
     const int result = libusb_control_transfer(handle_, 0x40, 0x40, 0x6400, 0x6400,

@@ -51,12 +51,12 @@ struct Options {
     std::string audio_path{"/tmp/ipm_wp4/capture.wav"};
     std::chrono::seconds duration{15};
     bool verbose{};
-    // libusb_clear_halt sends CLEAR_FEATURE(ENDPOINT_HALT), which resets the
-    // host-side data toggle. On a freshly armed endpoint that can desynchronize
-    // the pipe from the device's own toggle, and the observable result is exactly
-    // what this tool measured: bulk IN delivers the device's first packet while
-    // every bulk OUT write times out. The Windows path clears the halt, so this
-    // switch exists to test whether Linux should.
+    // CLEAR_FEATURE(ENDPOINT_HALT) on both bulk endpoints, which is what the
+    // reference client does and the only control traffic it sends before it
+    // starts streaming. An earlier revision skipped it on Linux on the theory
+    // that resetting the data toggle would desynchronize a freshly armed OUT
+    // pipe; the reference contradicts that, so the default is back to issuing it
+    // and this switch exists to A/B the two on a device that arms Valeria.
     bool clear_halt{true};
 };
 
@@ -401,11 +401,15 @@ int stream_to_disk(const Options& options,
             connection.configuration_was_set() ? "yes" : "no (already active)");
     }
 
-    // clear_halt is deliberately not issued: CLEAR_FEATURE(ENDPOINT_HALT) resets
-    // the host-side data toggle, and on a freshly armed endpoint that can leave
-    // the OUT pipe out of step with the device. The Windows path needs it for the
-    // libusb-win32 backend; nothing here does.
-    std::printf("clear_halt            : not issued on Linux\n");
+    if (options.clear_halt) {
+        std::string halt_diagnostic;
+        const bool cleared = connection.clear_halt(halt_diagnostic);
+        std::printf("clear_halt            : %s%s%s\n",
+            cleared ? "both endpoints" : "failed",
+            halt_diagnostic.empty() ? "" : " — ", halt_diagnostic.c_str());
+    } else {
+        std::printf("clear_halt            : skipped (--no-clear-halt)\n");
+    }
 
     quicktime::SessionOptions session_options;
     session_options.demo_mode = true;
