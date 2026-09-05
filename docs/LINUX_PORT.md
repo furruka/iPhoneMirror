@@ -219,6 +219,59 @@ usbmuxd 完全可以在配置 5 里工作，它只是自己选了 4。
 **一个字节都没发**（`bulk reads: with_data=0`）。可能原因未区分：屏幕锁定、
 未信任、或 usbmuxd 停止导致 iOS 没有 lockdown 会话因而拒绝启动 Valeria。
 
+#### usbmuxd 与采集配置互斥（双向实测）
+
+- **我们先 claim**：claim 住 config 5 的 interface 2 之后启动 usbmuxd，配置稳定
+  保持 5——已 claim 的接口确实让别人的 `set_configuration` 拿到 BUSY。但 usbmuxd
+  自己的日志是
+  `Could not set configuration 4 for device 3-33: LIBUSB_ERROR_BUSY`，
+  然后**直接放弃、不添加设备**（环境报告 `state=1` = UsbPresentNoMux）。
+- **usbmuxd 先连上**：它 `Connected to v2.0 device 1` 之后，我们的每次
+  `set_configuration` 都是 BUSY。
+
+结论：**usbmuxd 1.1.1 硬要求它自己选的配置（本机是 4），拿不到就整体退出。**
+而配置 5 里其实同时有 interface 1（`0xFF/0xFE` mux）与 interface 2
+（`0xFF/0x2A` AV），两者本可共存，只是 usbmuxd 不肯用配置 5。
+
+#### 干净序列实测（usbmuxd 被 mask，无竞争）
+
+拔插数据线拿到干净状态（4 个配置）后，`systemctl mask usbmuxd` 让 udev 无法拉起
+它，再跑一次完整序列：
+
+```
+0x52 acknowledged     : yes
+recovery              : ready=yes set_attempts=1 overwrites=0 claim_attempts=1
+endpoints             : config=5 interface=2 alt=0 in=0x84 out=0x03
+clear_halt            : ok
+recover_handshake     : ok
+ping write            : failed (LIBUSB_ERROR_TIMEOUT (-7))   ×12
+bulk reads            : with_data=0 bytes=0 packets=0
+```
+
+配置轨迹（0.12 s 采样）：
+
+```
+14:36:38.440  numcfg=4  cfg=（空，即未配置）  ← udev 的 bConfigurationValue="0" 可观测
+14:36:40.316  numcfg=5  cfg=5                ← 我们 set 成功，此后 25 s 不变
+```
+
+**所以 USB 与配置这一侧全部走通了**：0x52 生效、重枚举、抢窗口（无竞争时一次
+成功）、set_configuration 生效并稳定保持、claim 成功、端点正确。**竞争从来不是
+真正的阻塞点。**
+
+**真正的阻塞点：iOS 不服务 Valeria 端点。** bulk OUT 写恒为
+`LIBUSB_ERROR_TIMEOUT`，bulk IN 在 25 s 内零字节。屏幕已解锁、已信任（用户确认），
+usbmuxd 有无都一样。
+
+参考实现的协议文档给了一条关键线索：AV 配置里那 4 个 bulk 端点是
+**「2 个用于与设备上的 usbmuxd 通信，另 2 个收发 AV 数据」**。本机上这 4 个端点
+分在两个接口（interface 1 = mux，interface 2 = AV）。据此的最强假设是：
+**iOS 只在主机同时服务同一配置里的设备端 mux 通道时才启动 Valeria。**
+Windows 上这件事由 Apple 的 usbmux 驱动在同一配置内完成；Linux 上 usbmuxd 拒绝
+使用配置 5，所以那条通道从来没有建立过——这解释了目前观察到的全部现象。
+
+以上结论均基于 **iPadOS 27 Beta 4**，未在正式版或 iPhone 上复核。
+
 P1 的构建结论：`src/Core` 的 5 个可移植翻译单元（Protocol / Media / CoreMedia / H264）
 在 GCC 16.2 与 Clang 22.1 下都能构建出 `libiPhoneMirror.Core.so`，`ctest` 3/3 通过
 （`OutputModeStateTests`、`UsbConfigurationRestorePolicyTests`、
