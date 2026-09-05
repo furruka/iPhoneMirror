@@ -46,13 +46,17 @@ else()
     # docs/LINUX_PORT.md for the phase status. The shared capture state machine
     # builds against the media seams, whose Linux implementations are stubs
     # until the FFmpeg decoder and PipeWire renderer land.
-    set(IPHONEMIRROR_CORE_SOURCES
-        ${IPHONEMIRROR_CORE_PORTABLE_SOURCES}
-        src/LinuxCoreApi.cpp
+    set(IPHONEMIRROR_CORE_LINUX_SOURCES
         src/Device/LinuxAppleUsbDiscovery.cpp
         src/Device/LinuxDeviceManager.cpp
         src/Device/LinuxEnvironmentProbe.cpp
+        src/Device/LinuxUdevMonitor.cpp
+        src/Transport/LinuxUsbConfiguration.cpp
         src/Media/LinuxMediaStubs.cpp)
+    set(IPHONEMIRROR_CORE_SOURCES
+        ${IPHONEMIRROR_CORE_PORTABLE_SOURCES}
+        ${IPHONEMIRROR_CORE_LINUX_SOURCES}
+        src/LinuxCoreApi.cpp)
 endif()
 
 add_library(iPhoneMirror.Core SHARED ${IPHONEMIRROR_CORE_SOURCES})
@@ -115,9 +119,11 @@ else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(IPHONEMIRROR_LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)
     pkg_check_modules(IPHONEMIRROR_CRYPTO REQUIRED IMPORTED_TARGET libcrypto)
+    pkg_check_modules(IPHONEMIRROR_UDEV REQUIRED IMPORTED_TARGET libudev)
     target_link_libraries(iPhoneMirror.Core PRIVATE
         PkgConfig::IPHONEMIRROR_LIBUSB
-        PkgConfig::IPHONEMIRROR_CRYPTO)
+        PkgConfig::IPHONEMIRROR_CRYPTO
+        PkgConfig::IPHONEMIRROR_UDEV)
 endif()
 
 set_target_properties(iPhoneMirror.Core PROPERTIES
@@ -270,6 +276,36 @@ if(IPHONEMIRROR_BUILD_TESTS)
         iPhoneMirror.CompileOptions)
     add_test(NAME UsbConfigurationRestorePolicyTests
         COMMAND iPhoneMirror.UsbConfigurationRestorePolicy.Tests)
+
+    # Header-only policy, so this builds on both platforms even though only the
+    # Linux capture path needs the recovery it describes.
+    add_executable(iPhoneMirror.UsbReenumerationPolicy.Tests
+        tests/UsbReenumerationPolicyTests.cpp)
+    target_include_directories(iPhoneMirror.UsbReenumerationPolicy.Tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(iPhoneMirror.UsbReenumerationPolicy.Tests PRIVATE
+        iPhoneMirror.CompileOptions)
+    add_test(NAME UsbReenumerationPolicyTests
+        COMMAND iPhoneMirror.UsbReenumerationPolicy.Tests)
+
+    # WP4 headless wired capture. It changes the USB configuration, so it is
+    # gated behind the same option as the Windows real-device probe.
+    if(IPHONEMIRROR_BUILD_DANGEROUS_USB_TOOLS AND NOT WIN32)
+        # The library exports only the C ABI (hidden visibility), so the tool
+        # recompiles the sources it needs, the same way CoreTests does.
+        add_executable(iPhoneMirror.Linux.HeadlessCapture
+            tools/LinuxHeadlessCapture.cpp
+            ${IPHONEMIRROR_CORE_PORTABLE_SOURCES}
+            ${IPHONEMIRROR_CORE_LINUX_SOURCES})
+        target_include_directories(iPhoneMirror.Linux.HeadlessCapture PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_link_libraries(iPhoneMirror.Linux.HeadlessCapture PRIVATE
+            iPhoneMirror.CompileOptions
+            PkgConfig::IPHONEMIRROR_LIBUSB
+            PkgConfig::IPHONEMIRROR_CRYPTO
+            PkgConfig::IPHONEMIRROR_UDEV)
+    endif()
 
     if(IPHONEMIRROR_BUILD_DANGEROUS_USB_TOOLS AND WIN32)
         add_executable(iPhoneMirror.LibUsb0Probe

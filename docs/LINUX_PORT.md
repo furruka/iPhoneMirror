@@ -55,6 +55,7 @@ Linux 后端一律以新增文件实现。
 | P1-S4 | spike：解码 → dmabuf → libplacebo 出画并测延迟 | `[x]` |
 | P2 | `CaptureSession.cpp` 抽缝共享（方案 X；`wchar_t` 保留，`ApiVersion` 保持 18） | `[x]` |
 | P3-WP3 | `LinuxCoreApi.cpp` + `LinuxDeviceManager` + `LinuxEnvironmentProbe` + udev 规则 | `[x]` |
+| P3-WP4 | 重枚举恢复策略 + libudev 监视器 + 无头采集工具（**真机未验**） | `[~]` |
 | P3 | Linux USB 采集（无头验证优先，**需真机**） | `[ ]` |
 | P4 | FFmpeg 解码 / libplacebo 渲染 / PipeWire 音频 | `[ ]` |
 | P5 | Avalonia GUI（P5a 最小外壳进 M1，P5b 全量对齐随后） | `[ ]` |
@@ -131,6 +132,44 @@ LD_LIBRARY_PATH=build/linux/src/Core \
 结尾，`install` + `udevadm control --reload-rules` 之后该结论消失，
 `im_start_capture` 稳定返回 `-7` 并说明由 WP4/WP5 负责。`uaccess` 的 ACL 是否
 真的落到 `/dev/bus/usb` 节点上**未验证**，要等 WP4 的真机闸门。
+
+### WP4：重枚举恢复（设计已就绪，**真机未验**）
+
+这是 §4.1 那条最高风险约束的对策。Windows 不需要它：AppleUsbFilter 会保留
+0x52 选中的配置。Linux 上 usbmuxd 的 `39-usbmuxd.rules` 含
+`ACTION=="add", ATTR{bConfigurationValue}="0"`，所以设备每次重新出现，udev 都把
+活动配置写回 0，`libusb_claim_interface` 随即失败——**主机必须自己重发
+SET_CONFIGURATION**。
+
+- `Capture/UsbReenumerationPolicy.h`：纯状态机。要求 QuickTime 配置在**连续两次
+  采样**中都活着才允许 claim（一次 udev 处理窗口过去了才算稳定），把重发次数
+  限死在 5 次，并**统计配置被覆盖的次数**——那个计数就是这条 HYPOTHESIS 的证据。
+  单测 `UsbReenumerationPolicyTests` 覆盖了分类优先级、稳定性要求、覆盖计数、
+  预算耗尽后不谎报成功。
+- `Device/LinuxUdevMonitor.{h,cpp}`：libudev netlink 监听。轮询 libusb 只能回答
+  「设备在不在」，答不了「它刚刚重新出现」，而后者才是要抓的那个边沿。
+  `bConfigurationValue` 从 sysfs 读，**不需要打开设备**，所以在 udev 还没授权
+  节点的窗口里也读得到。用 devpath 末段（端口链）作为跨重枚举的稳定身份——地址
+  和 product id 都会变。
+- `Transport/LinuxUsbConfiguration.{h,cpp}`：Linux 专用的 SET_CONFIGURATION。
+  `LIBUSB_ERROR_BUSY` 表示内核驱动（usbmuxd）还占着接口，是预期竞争而非故障。
+- `tools/LinuxHeadlessCapture.cpp`（`-DIPHONEMIRROR_BUILD_DANGEROUS_USB_TOOLS=ON`
+  才构建）：跑完整链路并把裸流写盘——**不解码、不渲染、不开窗**。这样 USB 半边
+  可以独立验证，不必等 FFmpeg 解码器；一个能被任意播放器打开的文件也比预览窗口
+  更硬的证据。视频写 Annex-B（含参数集，否则裸 dump 会丢），音频写 RIFF/WAVE。
+  每条退出路径都发 HPA0/HPD0 停止控制并请求恢复普通配置。
+
+```sh
+cmake -S . -B build/linux -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+      -DIPHONEMIRROR_BUILD_DANGEROUS_USB_TOOLS=ON
+cmake --build build/linux
+./build/linux/src/Core/iPhoneMirror.Linux.HeadlessCapture \
+    --serial <udid> --seconds 15 --verbose
+```
+
+**未验证项（全部等真机）**：0x52 后 udev 是否真的把配置写回 0、写回几次；
+重发 SET_CONFIGURATION 能否让配置留住；usbmuxd 是否会抢回设备；
+`uaccess` ACL 是否覆盖 `/dev/bus/usb` 节点；握手状态机在 iOS 27 Beta 4 上的行为。
 
 P1 的构建结论：`src/Core` 的 5 个可移植翻译单元（Protocol / Media / CoreMedia / H264）
 在 GCC 16.2 与 Clang 22.1 下都能构建出 `libiPhoneMirror.Core.so`，`ctest` 3/3 通过
