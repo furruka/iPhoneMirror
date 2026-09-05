@@ -44,14 +44,15 @@ if(WIN32)
 else()
     # The Linux backends are added as this port progresses; see
     # docs/LINUX_PORT.md for the phase status. The shared capture state machine
-    # builds against the media seams, whose Linux implementations are stubs
-    # until the FFmpeg decoder and PipeWire renderer land.
+    # builds against the media seams; the video decoder is real, the audio
+    # renderer is still a stub until the PipeWire backend lands.
     set(IPHONEMIRROR_CORE_LINUX_SOURCES
         src/Device/LinuxAppleUsbDiscovery.cpp
         src/Device/LinuxDeviceManager.cpp
         src/Device/LinuxEnvironmentProbe.cpp
         src/Device/LinuxUdevMonitor.cpp
         src/Transport/LinuxUsbConfiguration.cpp
+        src/Media/LinuxFFmpegVideoDecoder.cpp
         src/Media/LinuxMediaStubs.cpp)
     set(IPHONEMIRROR_CORE_SOURCES
         ${IPHONEMIRROR_CORE_PORTABLE_SOURCES}
@@ -120,10 +121,16 @@ else()
     pkg_check_modules(IPHONEMIRROR_LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)
     pkg_check_modules(IPHONEMIRROR_CRYPTO REQUIRED IMPORTED_TARGET libcrypto)
     pkg_check_modules(IPHONEMIRROR_UDEV REQUIRED IMPORTED_TARGET libudev)
+    # libavcodec decodes what Media Foundation decodes on Windows; libswscale
+    # turns whatever planar format the decoder chose into the tightly packed
+    # NV12/P010 the DecodedFrame seam promises.
+    pkg_check_modules(IPHONEMIRROR_FFMPEG REQUIRED IMPORTED_TARGET
+        libavcodec libavutil libswscale)
     target_link_libraries(iPhoneMirror.Core PRIVATE
         PkgConfig::IPHONEMIRROR_LIBUSB
         PkgConfig::IPHONEMIRROR_CRYPTO
-        PkgConfig::IPHONEMIRROR_UDEV)
+        PkgConfig::IPHONEMIRROR_UDEV
+        PkgConfig::IPHONEMIRROR_FFMPEG)
 endif()
 
 set_target_properties(iPhoneMirror.Core PROPERTIES
@@ -266,6 +273,28 @@ if(IPHONEMIRROR_BUILD_TESTS)
         target_link_libraries(iPhoneMirror.Linux.EnvironmentReport PRIVATE
             iPhoneMirror.CompileOptions
             iPhoneMirror.Core)
+
+        # WP5 acceptance tool: decodes a file through the real IVideoDecoder
+        # seam. Needs no device either. libavformat is linked here and nowhere
+        # else: the capture path receives samples from USB, so the library itself
+        # has no reason to know about containers.
+        pkg_check_modules(IPHONEMIRROR_FFMPEG_FORMAT REQUIRED IMPORTED_TARGET
+            libavformat)
+        add_executable(iPhoneMirror.Linux.DecodeProbe
+            tools/LinuxDecodeProbe.cpp
+            src/Audio/PcmBufferPolicy.cpp
+            src/Media/CoreMedia.cpp
+            src/Media/H264.cpp
+            src/Media/LinuxFFmpegVideoDecoder.cpp
+            src/Media/LinuxMediaStubs.cpp
+            src/Media/VideoFrameCopy.cpp
+            src/Protocol/QuickTimePacket.cpp)
+        target_include_directories(iPhoneMirror.Linux.DecodeProbe PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_link_libraries(iPhoneMirror.Linux.DecodeProbe PRIVATE
+            iPhoneMirror.CompileOptions
+            PkgConfig::IPHONEMIRROR_FFMPEG
+            PkgConfig::IPHONEMIRROR_FFMPEG_FORMAT)
     endif()
 
     add_executable(iPhoneMirror.UsbConfigurationRestorePolicy.Tests
@@ -304,7 +333,8 @@ if(IPHONEMIRROR_BUILD_TESTS)
             iPhoneMirror.CompileOptions
             PkgConfig::IPHONEMIRROR_LIBUSB
             PkgConfig::IPHONEMIRROR_CRYPTO
-            PkgConfig::IPHONEMIRROR_UDEV)
+            PkgConfig::IPHONEMIRROR_UDEV
+            PkgConfig::IPHONEMIRROR_FFMPEG)
     endif()
 
     if(IPHONEMIRROR_BUILD_DANGEROUS_USB_TOOLS AND WIN32)

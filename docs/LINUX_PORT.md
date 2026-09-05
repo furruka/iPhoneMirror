@@ -57,7 +57,8 @@ Linux 后端一律以新增文件实现。
 | P3-WP3 | `LinuxCoreApi.cpp` + `LinuxDeviceManager` + `LinuxEnvironmentProbe` + udev 规则 | `[x]` |
 | P3-WP4 | 重枚举恢复策略 + libudev 监视器 + 无头采集工具（USB 半边真机通过） | `[x]` |
 | P3 | Linux USB 采集出画（**受阻**：bulk OUT 写恒超时，需 iPhone 继续调） | `[!]` |
-| P4 | FFmpeg 解码 / libplacebo 渲染 / PipeWire 音频 | `[ ]` |
+| P4 | FFmpeg 解码 / libplacebo 渲染 / PipeWire 音频 | `[~]` |
+| P4-WP5A | `LinuxFFmpegVideoDecoder`：libavcodec 解码 + libswscale 转 NV12/P010 | `[x]` |
 | P5 | Avalonia GUI（P5a 最小外壳进 M1，P5b 全量对齐随后） | `[ ]` |
 | P6 | UxPlay 引擎无线接收 | `[ ]` |
 | P7 | 打包、CI、文档 | `[ ]` |
@@ -427,6 +428,79 @@ P1 的构建结论：`src/Core` 的 5 个可移植翻译单元（Protocol / Medi
 在 GCC 16.2 与 Clang 22.1 下都能构建出 `libiPhoneMirror.Core.so`，`ctest` 3/3 通过
 （`OutputModeStateTests`、`UsbConfigurationRestorePolicyTests`、
 `DnsSdRegistrationPolicyTests`）。Windows 侧目标全部按平台裁剪，未做行为改动。
+
+### WP5-A：libavcodec 视频解码器（已通过，无需设备）
+
+`src/Core/src/Media/LinuxFFmpegVideoDecoder.{h,cpp}` 实现 `IVideoDecoder`，替换掉
+`LinuxMediaStubs.cpp` 里那个会抛 "not implemented yet" 的桩。`LinuxMediaStubs.cpp`
+现在只剩音频桩和 `materialize_gpu_frame`。
+
+三个不是库默认值的决定：
+
+- **切片线程，不用帧线程。** 帧线程用「延后几帧输出」换吞吐，而镜像的全部意义就是
+  桌上的屏幕和显示器上的窗口一起动。同理设了 `AV_CODEC_FLAG_LOW_DELAY`。
+- **Annex-B extradata。** 格式描述里的参数集本来就是一条条裸 NAL，libavcodec 的
+  H.264/HEVC 解码器接受起始码分隔的参数集流，所以不再去拼一个 avcC/hvcC——那只是
+  多一份可以写错的序列化。
+- **色彩以 QuickTime 格式描述为准。** libavcodec 解析出的 VUI 只填格式描述留空的
+  项，剩下的空缺套用与 Windows 解码器**逐条相同**的兜底（primaries→bt709、
+  transfer→bt709、matrix→`height >= 720 ? bt709 : bt601`、range→limited）。这样一帧
+  到渲染器时两个平台带的色彩元数据是同一套。
+
+输出格式按 `bit_depth_luma > 8 || bit_depth_chroma > 8` 选 P010 否则 NV12，和
+Windows 侧 `prefer_p010` 同一条判据。奇数宽高向下取偶（4:2:0 的色度寻址不到半个
+像素）；目前测到的 Apple 采集几何全是偶数，所以这只是防畸形流。
+
+#### 验收：与 ffmpeg 自己的输出逐字节相同
+
+`src/Core/tools/LinuxDecodeProbe.cpp`（Linux 上总是构建，不需要设备、不改任何状态）
+读一个 MP4，把每个 `AVPacket` 直接喂给 `decode()`——**容器里的包本来就是长度前缀的
+AVCC 样本，和连上的 iPhone 发的是同一种形状**，所以这条路径就是采集路径。参数集从
+`avcC` 里取，对应格式描述里的参数集。libavformat 只链进这个工具，不进 Core：采集
+路径的样本来自 USB，库本身没有理由认识容器。
+
+8 bit / NV12：
+
+```
+input                 : probe.mp4 1170x2532 depth=8 nalu_length_size=4 sps=1 pps=1
+decoder               : h264 (libavcodec slice-threaded software) output=nv12
+samples               : 120        frames : 120
+first frame           : 1170x2532 stride=1170 bytes=4443660 format=nv12
+colour                : primaries=bt709 transfer=bt709 matrix=bt709 range=limited hdr=no
+```
+
+10 bit / P010：
+
+```
+input                 : p010.mp4 640x360 depth=10 nalu_length_size=4 sps=1 pps=1
+decoder               : h264 (libavcodec slice-threaded software) output=p010
+samples               : 30         frames : 30
+first frame           : 640x360 stride=1280 bytes=691200 format=p010
+colour                : primaries=bt709 transfer=bt709 matrix=bt601 range=limited hdr=no
+```
+
+`bytes` 两边都对得上（`1170*2532*3/2` 与 `640*360*3`），`matrix=bt601` 正是
+`height < 720` 那条兜底在起作用。
+
+最硬的一条证据是**逐字节比对**：
+
+```sh
+ffmpeg -i probe.mp4 -pix_fmt nv12   -f rawvideo reference.nv12
+ffmpeg -i p010.mp4  -pix_fmt p010le -f rawvideo ref.p010
+cmp out.nv12 reference.nv12   # 相同（533,239,200 字节 / 120 帧）
+cmp out.p010 ref.p010         # 相同（20,736,000 字节 / 30 帧）
+```
+
+两条都**完全相同**。这同时证明了解码、libswscale 的平面重排、以及紧凑打包的
+stride 计算都没有偏差——不是「看起来对」，是位级相同。
+
+#### 尚未做的部分
+
+- **硬件解码（VAAPI）** 还没接。`decoder_acceleration()` 现在诚实地返回 `Software`，
+  `selected_decoder_is_hardware()` 返回 `false`。S4 spike 已经验证过 VAAPI 路径的
+  硬件约束，接入是下一个增量。
+- HEVC 走的是同一套代码，但验收素材是 High 10 的 H.264：探针只解析 `avcC`，MP4 里
+  的 HEVC 参数集在 `hvcC` 里，要验 HEVC 得先给探针加 `hvcC` 解析。
 
 ### v1 明确不包含
 

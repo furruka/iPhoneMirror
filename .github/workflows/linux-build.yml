@@ -46,11 +46,13 @@ jobs:
 
       # The portable Core source list now includes the USB transport and the
       # shared capture session, which link the distribution's libusb-1.0,
-      # libcrypto and libudev (all REQUIRED in src/Core/CMakeLists.txt).
+      # libcrypto and libudev (all REQUIRED in src/Core/CMakeLists.txt). The
+      # Linux video decoder adds libavcodec/libavutil/libswscale, and the WP5
+      # acceptance tool adds libavformat.
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes ninja-build libusb-1.0-0-dev libssl-dev libudev-dev pkg-config
+          sudo apt-get install --no-install-recommends --yes ninja-build libusb-1.0-0-dev libssl-dev libudev-dev libavcodec-dev libavutil-dev libswscale-dev libavformat-dev pkg-config
 
       - name: Configure
         env:

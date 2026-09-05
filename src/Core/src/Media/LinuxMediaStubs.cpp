@@ -1,69 +1,23 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// Linux platform backends for the capture session's media seams. The FFmpeg
-// decoder (WP5) and the PipeWire renderer (WP5) replace these stubs; until
-// then the shared state machine compiles on Linux and every construction
-// reports an explicit, greppable "not implemented yet" failure rather than
-// silently doing nothing.
+// Linux platform backends for the capture session's media seams. The video
+// decoder now lives in Media/LinuxFFmpegVideoDecoder.cpp; the PipeWire renderer
+// (WP5) replaces the audio stub here. Until then the shared state machine
+// compiles on Linux and audio playback does nothing rather than pretending.
 
 #include "Media/ActiveVideoDecoder.h"
 
 #include "Media/CoreMedia.h"
+#include "Media/LinuxFFmpegVideoDecoder.h"
 #include "Audio/PcmBufferPolicy.h"
 
 #include <stdexcept>
 
 namespace iPhoneMirror::media {
 
-namespace {
-
-class StubVideoDecoder final : public IVideoDecoder {
-public:
-    explicit StubVideoDecoder(DecoderPreference preference)
-        : preference_(preference) {}
-
-    void configure(const coremedia::FormatDescription&,
-        std::uint32_t, std::uint32_t) override {
-        fail();
-    }
-    [[nodiscard]] std::vector<DecodedFrame> decode(
-        std::span<const std::uint8_t>, std::int64_t, std::int64_t) override {
-        fail();
-        return {};
-    }
-    [[nodiscard]] std::vector<DecodedFrame> drain() override { return {}; }
-    void flush() override {}
-
-    [[nodiscard]] DecoderPreference preference() const noexcept override {
-        return preference_;
-    }
-    [[nodiscard]] std::string_view selected_decoder_name() const noexcept override {
-        return "(linux stub)";
-    }
-    [[nodiscard]] DecoderAcceleration decoder_acceleration() const noexcept override {
-        return DecoderAcceleration::Unknown;
-    }
-    [[nodiscard]] bool selected_decoder_is_hardware() const noexcept override {
-        return false;
-    }
-    [[nodiscard]] PixelFormat output_pixel_format() const noexcept override {
-        return PixelFormat::Nv12;
-    }
-
-private:
-    [[noreturn]] static void fail() {
-        throw std::runtime_error(
-            "the Linux FFmpeg video decoder is not implemented yet (WP5)");
-    }
-
-    DecoderPreference preference_;
-};
-
-} // namespace
-
 std::unique_ptr<IVideoDecoder> make_platform_video_decoder(
     DecoderPreference preference) {
-    return std::make_unique<StubVideoDecoder>(preference);
+    return make_ffmpeg_video_decoder(preference);
 }
 
 namespace detail {
