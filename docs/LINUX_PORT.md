@@ -478,7 +478,65 @@ bulk reads            : with_data=1 bytes=16 packets=1
 
 星翼确认设备**全程没有锁过屏**。所以解锁不是变量，这条排除掉。
 
-#### 结果不可重复，而这本身是最重要的一条观测
+#### 已确认：iOS 每个开机周期只服务一次 Valeria 会话
+
+重启后连跑两轮，**两轮的 claim 都成功**，所以这不是竞争或时序问题：
+
+```
+===== run 1: 重启后的第一次会话 =====
+recovery              : ready=yes set_attempts=2 claim_attempts=2
+clear_halt            : both endpoints
+inbound               : 16 bytes
+  10 00 00 00 67 6e 69 70 00 00 00 00 01 00 00 00     ← 设备的 PING
+outbound              : 16 bytes
+  10 00 00 00 67 6e 69 70 00 00 00 00 01 00 00 00     ← 我们的回复
+handshake state       : 1
+bulk reads            : with_data=1 bytes=16 packets=1
+
+===== 主机端口复位 =====  numcfg=5 active=1
+
+===== run 2: 同一开机周期内的第二次会话 =====
+recovery              : ready=yes set_attempts=1 claim_attempts=1
+clear_halt            : both endpoints
+bulk reads            : with_data=0 bytes=0 packets=0     ← 零字节
+```
+
+**结论：第一次会话能收到 PING，同一开机周期内的第二次就沉默。** 这解释了今天所有的
+「结果不可重复」，也解释了采集配置为什么会变成摘不掉——iOS 那边留着一个半开会话。
+推论：**我们的 teardown 没有落地。**
+
+#### 副产品一：字节序约定在线上得到证实
+
+设备发来的 PING 是 `10 00 00 00 67 6e 69 70 ...`——magic 字节确实是 `67 6e 69 70`
+（"gnip"），和 `fourcc` 显示顺序 + `append_u32_le` 产生的完全一致。我们的回复与设备的
+PING **逐字节相同**。这条从「按代码推理」升级成了「线上实测」，不要再动它。
+
+#### 副产品二：Valeria 接口的端点布局已封闭，不存在选错的可能
+
+配置 5（`iConfiguration 10 = "PTP + Apple Mobile Device + Valeria"`）的完整布局：
+
+| 接口 | 类/子类/协议 | alt | 端点 |
+|---|---|---|---|
+| 0 | 06/01/01 Imaging PTP | 0 | 0x01 OUT, 0x81 IN, 0x82 INT |
+| 1 | FF/FE/02 usbmux | 0 | 0x02 OUT, 0x83 IN |
+| **2** | **FF/2A/FF Valeria** | **只有 0** | **0x84 IN, 0x03 OUT，各 512 B** |
+| 3 | 02/0D Communications | 0 | 无 |
+| 4 | 0A/00/01 CDC Data | 0 / 1 | alt 0 无；alt 1 有 0x85 IN 等 |
+
+Valeria 接口**只有一个 alt setting、只有两个 bulk 端点**，所以
+`interface=2 alt=0 in=0x84 out=0x03` 是唯一可能的选择。「参考文档说有 4 个 bulk 端点、
+我们可能挑错了那一对」这条假设**彻底排除**。
+
+#### 剩下的问题，以及它为什么难迭代
+
+即使是开机后的第一次会话也停在 `WaitingForAudioClock`：设备发 PING、我们回一个字节
+相同的 PING、写成功（URB 完成即设备已 ACK）、然后 `SYNC CWPA` 不来。
+
+接线层面已经全部排除：接口对、端点对、claim 成功、`clear_halt` 成功、回复字节正确。
+所以问题在会话语义上，而**每做一次实验要重启一次设备**——这才是当前真正的成本。因此
+下一步是先修 teardown（无需设备的代码工作）：只要会话能被干净关掉，每个开机周期就不
+再只有一次机会，迭代成本才降下来。
+
 
 同一条命令、同样干净的起点（`count=4`）、usbmuxd 同样 mask、`clear_halt` 同样两个端点
 都发、claim 同样成功——**一次收到 PING，下一次零字节**。
@@ -490,16 +548,7 @@ bulk reads            : with_data=1 bytes=16 packets=1
 | C | 主机侧端口复位后 | `--no-cycle` | 1 / 1 | 零字节 |
 
 **唯一收到 PING 的一轮，是设备刚重启之后的第一次尝试。** 两次零字节都发生在同一个
-开机周期内、且此前当天已经开过 Valeria 会话。
-
-**首选假设（HYPOTHESIS，待验证）：iOS 每个开机周期只肯开一次 Valeria 会话**，或者说
-一旦有过一次没有被干净拆掉的会话，之后就不再响应，直到重启。这一条能同时解释三件事：
-结果的随机性、采集配置变得摘不掉、以及设备沉默。
-
-推论是我们的**teardown 不干净**：握手从没走到 Streaming，写管道当时又在超时，所以
-HPA0/HPD0 停止消息大概根本没送达，iOS 那边留着一个半开的会话。
-
-验证方式很明确：重启 → 连跑两轮。预期第一轮收到 PING、第二轮沉默。
+开机周期内、且此前当天已经开过 Valeria 会话。这条观测催生了上面那个已确认的结论。
 
 #### 一个有用的副产品：主机侧端口复位让 claim 变可靠
 
