@@ -396,7 +396,12 @@ int stream_to_disk(transport::QtUsbContext& context,
             endpoints.bulk_in_packet_size, endpoints.bulk_out_packet_size);
     }
 
-    try { connection.clear_halt(); } catch (...) {}
+    try {
+        connection.clear_halt();
+        std::printf("clear_halt            : ok\n");
+    } catch (const std::exception& error) {
+        std::printf("clear_halt            : failed (%s)\n", error.what());
+    }
 
     quicktime::SessionOptions session_options;
     session_options.demo_mode = true;
@@ -412,6 +417,8 @@ int stream_to_disk(transport::QtUsbContext& context,
     std::uint64_t packets_decoded{};
     auto last_state = quicktime::SessionState::WaitingForPing;
     const auto deadline = Clock::now() + options.duration;
+    auto next_ping = Clock::now() + std::chrono::seconds(3);
+    std::uint64_t ping_attempts{};
     bool ping_sent{};
 
     while (Clock::now() < deadline) {
@@ -428,13 +435,40 @@ int stream_to_disk(transport::QtUsbContext& context,
         }
         if (count == 0) {
             // The reference flow sends one PING after the first read timeout so
-            // a freshly activated endpoint starts talking.
-            if (!ping_sent) {
-                ping_sent = true;
+            // a freshly activated endpoint starts talking. Retried here on a
+            // slow cadence, and every step reported: a silent device is the
+            // failure being diagnosed, so a swallowed write error would hide the
+            // answer.
+            const auto now = Clock::now();
+            // The reference protocol documentation is explicit that the device
+            // speaks first: "we need to wait for the device to send us a ping
+            // packet", and only then does the host reply. So do not open with a
+            // PING. The control kick plus an unsolicited PING stays as a late
+            // fallback for an endpoint that never starts on its own, which is
+            // what the Windows path also does after its first read timeout.
+            if (now >= next_ping) {
+                next_ping = now + std::chrono::seconds(2);
+                ++ping_attempts;
+                if (!ping_sent) {
+                    ping_sent = true;
+                    try {
+                        connection.recover_handshake();
+                        std::printf("recover_handshake     : ok\n");
+                    } catch (const std::exception& error) {
+                        std::printf("recover_handshake     : failed (%s)\n",
+                            error.what());
+                    }
+                }
                 try {
-                    connection.recover_handshake();
                     connection.write(quicktime::make_ping(), 1000);
-                } catch (...) {}
+                    if (ping_attempts <= 2) {
+                        std::printf("ping write            : ok (attempt %llu)\n",
+                            static_cast<unsigned long long>(ping_attempts));
+                    }
+                } catch (const std::exception& error) {
+                    std::printf("ping write            : failed (%s)\n",
+                        error.what());
+                }
             }
             continue;
         }
@@ -511,6 +545,8 @@ finished:
     std::printf("audio                 : %s packets=%llu bytes=%zu\n",
         options.audio_path.c_str(),
         static_cast<unsigned long long>(audio_packets), audio.data_bytes());
+    std::printf("ping attempts         : %llu\n",
+        static_cast<unsigned long long>(ping_attempts));
     std::printf("bulk reads            : with_data=%llu bytes=%llu packets=%llu\n",
         static_cast<unsigned long long>(reads_with_data),
         static_cast<unsigned long long>(bytes_read),
