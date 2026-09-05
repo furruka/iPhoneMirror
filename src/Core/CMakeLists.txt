@@ -155,11 +155,13 @@ if(IPHONEMIRROR_BUILD_TESTS)
             src/Media/CoreMedia.cpp
             src/Media/VideoFrameCopy.cpp
             src/Media/MediaFoundationDecoder.cpp
+            src/Media/ActiveVideoDecoder.cpp
             src/Audio/PcmBufferPolicy.cpp
             src/Audio/WasapiRenderer.cpp
+            src/Text/Utf.cpp
             src/Transport/Socket.cpp
             src/Transport/AppleUsbSerial.cpp
-    src/Transport/UsbMuxClient.cpp
+            src/Transport/UsbMuxClient.cpp
             src/Transport/QtUsbTransport.cpp
             src/Transport/LibUsb0Transport.cpp
             src/Device/AppleUsbDiscovery.cpp

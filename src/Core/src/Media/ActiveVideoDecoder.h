@@ -26,8 +26,6 @@ namespace iPhoneMirror::media {
 
 namespace iPhoneMirror::audio {
 
-class WasapiRenderer;
-
 [[nodiscard]] std::unique_ptr<IAudioRenderer> make_platform_audio_renderer(
     const coremedia::AudioStreamBasicDescription& format,
     bool playback_enabled, float volume);

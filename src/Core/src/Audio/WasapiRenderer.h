@@ -21,9 +21,8 @@ enum class WasapiBufferingMode {
     NetworkJitter,
 };
 
-// The struct itself now lives in Audio/IAudioRenderer.h; this alias keeps the
-// historical unqualified name working for existing call sites.
-using PlaybackStats = IAudioRenderer::PlaybackStats;
+// PlaybackStats now lives in Audio/IAudioRenderer.h, in this same namespace,
+// so existing unqualified uses keep resolving.
 
 // Event-driven shared-mode WASAPI sink for the PCM stream carried by Apple's
 // QuickTime screen-capture protocol. All COM and endpoint calls live on the
