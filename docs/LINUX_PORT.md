@@ -1315,6 +1315,39 @@ latest-frame 邮箱（`std::shared_ptr<const media::DecodedFrame>`），注释�
 **正常 `im_stop_capture` 之后的连续会话没有这个问题**，所以这不是正常路径的缺陷，而是
 「进程被杀之后设备状态需要恢复」。真要做，做的是崩溃/被杀后的恢复，不是每次启动都 drain。
 
+#### 反控可行性探针：BlueZ 这条路走得通（两项都实测通过）
+
+勘查只能回答「能力位在不在」，回答不了「BlueZ 肯不肯让我们注册 HID 服务」——它内置的
+`input` 插件负责 HID **host** 角色，而且历史上对某些 SIG 保留 UUID 的 `GattManager1`
+注册是拒绝的。所以写了两个最小探针实测（`/tmp/hogp_probe.py`、`/tmp/adv_probe.py`，
+纯读+注册后立即注销，不改任何配置）：
+
+```
+RegisterApplication(00001812-0000-1000-8000-00805f9b34fb): ACCEPTED
+RegisterAdvertisement(peripheral, appearance=mouse):       ACCEPTED
+UnregisterAdvertisement: ok
+```
+
+环境侧的能力位也齐：
+
+| 项 | 实测 |
+|---|---|
+| BlueZ | 5.87，`bluetooth.service` active |
+| 适配器 | `hci0`，`org.bluez.GattManager1` 与 `org.bluez.LEAdvertisingManager1` 都在 |
+| 控制器 supported settings | 含 `le` 与 `advertising`（即支持 peripheral 角色） |
+| 广播实例 | `SupportedInstances=12`，当前占用 0 |
+| 托管侧依赖 | `python-dbus 1.4.0` + PyGObject 可用；BlueZ 另带 `btgatt-server`/`gatt-service` 可作对照 |
+
+**结论：反控走 BlueZ HOGP 可行，不需要重新设计方案。** 这是动手前最该先确认的那件事，
+现在确认了。
+
+`Appearance` 用 `0x03C2`（Mouse）而不是随便填——iOS 会按 appearance 过滤它愿意配对的
+HID 外设，这个字段不是装饰。
+
+剩下的未知已经不在「能不能做」而在「iOS 怎么反应」：辅助触控是否需要在 iPad 上手动打开、
+坐标系与旋转的映射（`BluetoothMouseOrientationMapper` 那 68 行正是为此存在）、以及配对
+流程要不要用户交互。这些都是真机闸门，到时候需要星翼配合配对一次。
+
 #### 反控（从桌面控制 iPad）的现状与形状
 
 Windows 侧的实现是 `src/App/Services/BluetoothHidMouseService.cs`，**1515 行 WinRT GATT**：
@@ -1344,8 +1377,8 @@ Windows 侧的实现是 `src/App/Services/BluetoothHidMouseService.cs`，**1515 
 
 - 虚拟摄像头（`src/VirtualCamera`）：Linux 侧应走 v4l2loopback 或 PipeWire 虚拟节点，
   保留 `VirtualCameraApi.h` 的接口形状，实现延后。
-- BLE HID 鼠标/键盘控制：WinRT GATT → BlueZ D-Bus HOGP 属于独立模块，需真机验证
-  iOS 辅助触控行为后另行安排。
+- ~~BLE HID 鼠标/键盘控制~~ → **已由星翼移入范围**（2026-09-05：「推完做反控然后移植
+  原版的前端」）。可行性已验证，见「反控可行性探针」一节。
 - 应用内覆盖式更新器：Linux 交由包管理器，仅保留"检查并通知"部分。
 
 ## Spike 实测结论
