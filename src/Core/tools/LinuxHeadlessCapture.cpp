@@ -66,13 +66,21 @@ struct Options {
     // been invalidated (it was taken while clear_halt was not being issued), so
     // this switch is how that belief gets retested.
     bool cycle_configuration{true};
+    // Sends 0x52 wIndex=2 and exits without claiming anything. Lets a caller put
+    // the capture configuration in place with a sysfs write — the way udev does
+    // it — so the claim afterwards finds it already active and issues no
+    // SET_CONFIGURATION of its own. That is the one step upstream's Windows path
+    // never takes, because AppleUsbFilter has already selected the
+    // configuration by the time it opens the device.
+    bool enable_only{};
 };
 
 void print_usage() {
     std::fprintf(stderr,
         "usage: iPhoneMirror.Linux.HeadlessCapture --serial <udid> "
         "[--video <path.h264>] [--audio <path.wav>] [--seconds N] "
-        "[--no-clear-halt] [--control-kick] [--no-cycle] [--verbose]\n");
+        "[--no-clear-halt] [--control-kick] [--no-cycle] [--enable-only] "
+        "[--verbose]\n");
 }
 
 std::optional<Options> parse(int argc, char** argv) {
@@ -107,6 +115,8 @@ std::optional<Options> parse(int argc, char** argv) {
             options.control_kick = true;
         } else if (argument == "--no-cycle") {
             options.cycle_configuration = false;
+        } else if (argument == "--enable-only") {
+            options.enable_only = true;
         } else {
             return std::nullopt;
         }
@@ -740,6 +750,10 @@ int main(int argc, char** argv) {
             std::printf("0x52 acknowledged     : %s\n",
                 acknowledged ? "yes" : "no (re-enumeration is the authority)");
             detach_expected = true;
+            if (options->enable_only) {
+                std::printf("enable only           : exiting before the claim\n");
+                return 0;
+            }
         } else if (!device->quicktime_configuration) {
             std::fprintf(stderr, "--no-cycle needs the capture configuration to "
                                  "already be present\n");
