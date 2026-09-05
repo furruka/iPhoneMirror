@@ -64,7 +64,7 @@ Linux 后端一律以新增文件实现。
 | P4-WP5D1 | `LinuxPlaceboRenderer`：NV12/P010 → libplacebo → RGBA，与 CPU 色彩数学一致 | `[x]` |
 | P4-WP5D2 | 导出内存 FD + 双向 Vulkan 信号量（Avalonia 导入端属 WP6） | `[x]` |
 | P5-WP6a | 预览 C ABI（`LinuxPreviewApi.h`，5 个导出，ABI 尺寸自校验） | `[x]` |
-| P5-WP6b | Avalonia 最小外壳：导入成功，**帧还没上屏**（见下） | `[~]` |
+| P5-WP6b | Avalonia 最小外壳：导入 + 上屏 + 动画全部通过（放的是文件，未接设备） | `[x]` |
 | P5 | Avalonia GUI（P5a 最小外壳进 M1，P5b 全量对齐随后） | `[~]` |
 | P6 | UxPlay 引擎无线接收 | `[ ]` |
 | P7 | 打包、CI、文档 | `[ ]` |
@@ -1193,7 +1193,38 @@ S3 spike 是这么做的（`PlaceboSurfaceShim.c:626-636`）：渲染完之后
 `present()` 开头加 `pl_vulkan_release_ex`（wait = `available`），并且 `read_back_rgba` 要在
 持有期间先 release——否则读回会和 compositor 抢这张图。
 
-**没有把这一步记成通过。** 已通的是 ABI、导入、设备 UUID 和诊断可观察性；上屏没通。
+#### 加上 hold/release 之后上屏通了
+
+`present()` 现在：开头 `pl_vulkan_release_ex`（等 `available`）把图像拿回来 → 渲染 →
+`pl_vulkan_hold_ex`（signal = `render_completed`）交出去。`read_back_rgba` 也先 release，
+否则读回会和 importer 抢同一张图。共享布局用 `VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL`，
+队列族 `VK_QUEUE_FAMILY_IGNORED`，和 S3 spike 一致。
+
+```
+abi size: match
+compositor device uuid: 8680A8A7040000000002000000000000
+surface: 2360x1640 vk_format=37 size=15761408
+import image and semaphores: ok
+presented 1 / 2 / 3 / 60 frames of 2360x1640
+```
+
+**动画也验了**：换成有明显运动的 `testsrc2` 素材（斜扫线 + 帧号），间隔 4 秒各截一张图，
+两张不同；帧计数跑到 360（120 帧素材在循环）。窗口里能看到斜线在移动、叠加的
+`presented 299 frames of 1170x2532` 在跳。读回路径不受影响，`RenderProbe` 与
+`PreviewAbiProbe` 仍然 PASS。
+
+#### 这一步放的是文件，不是设备——所以操作 iPad 画面不会变
+
+`src/LinuxShell` 目前从裸 NV12 文件喂帧，**根本没有连设备**。星翼看到「能动但动的不是
+iPad 实时画面」是设计如此：这一步要证明的是「Core 渲染的图能被窗口绑定并显示」，把它和
+USB 采集解耦才能在没有设备时验证。
+
+（此外第一次看到的「定格」还有一层原因：当时放的是真机采的 300 帧 iPad 桌面，而那段
+桌面本来就是静止的，看起来自然像单帧。）
+
+**下一个增量**：把 `CaptureSession` 的解码输出接到同一个渲染器上。Core 侧的解码器和
+渲染器都已经各自验过，缺的只是中间那条转发——`im_linux_preview_present_nv12` 是给这一步
+之前用的临时入口，流式路径会直连渲染器而不走它。
 
 ### v1 明确不包含
 

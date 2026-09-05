@@ -28,6 +28,10 @@ namespace iPhoneMirror::media {
 
 namespace {
 
+// The layout the importer expects to find the image in. TRANSFER_SRC_OPTIMAL is
+// what the S3 spike established works with Avalonia's importer.
+constexpr VkImageLayout SharedLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+
 [[nodiscard]] pl_color_primaries map_primaries(
     coremedia::ColorPrimaries value) noexcept {
     switch (value) {
@@ -129,6 +133,10 @@ public:
 
     [[nodiscard]] bool present(const DecodedFrame& frame) override {
         last_error_.clear();
+        // Take the image back from the importer before drawing into it. Waiting
+        // on `available` is what stops us overwriting a frame it is still
+        // sampling; the first present has nothing to take back.
+        release_from_importer(available_);
         if (frame.width == 0 || frame.height == 0 || frame.nv12.empty())
             return fail("the decoded frame is empty");
         const bool ten_bit = frame.pixel_format == PixelFormat::P010;
@@ -195,12 +203,29 @@ public:
                 &pl_render_default_params)) {
             return fail("pl_render_image failed");
         }
+
+        // Hand the image over. This is also what signals `render_completed`, and
+        // without it the importer waits for a signal that never comes: the
+        // compositor's present call simply never returns.
+        if (exported_.valid) {
+            struct pl_vulkan_hold_params hold = {};
+            hold.tex = target_;
+            hold.layout = SharedLayout;
+            hold.qf = VK_QUEUE_FAMILY_IGNORED;
+            hold.semaphore.sem = render_completed_;
+            if (!pl_vulkan_hold_ex(vulkan_->gpu, &hold))
+                return fail("pl_vulkan_hold_ex failed");
+            held_ = true;
+        }
         return true;
     }
 
     [[nodiscard]] bool read_back_rgba(
         std::span<std::uint8_t> destination) override {
         last_error_.clear();
+        // Reading contends with the importer for the same image, so take it back
+        // first. No semaphore: this path has no importer to wait for.
+        release_from_importer(VK_NULL_HANDLE);
         const auto required = static_cast<std::size_t>(width_) * height_ * 4U;
         if (destination.size() < required)
             return fail("the readback buffer is smaller than the target");
@@ -230,6 +255,17 @@ public:
     }
 
 private:
+    void release_from_importer(VkSemaphore wait) noexcept {
+        if (!held_) return;
+        struct pl_vulkan_release_params release = {};
+        release.tex = target_;
+        release.layout = SharedLayout;
+        release.qf = VK_QUEUE_FAMILY_IGNORED;
+        release.semaphore.sem = wait;
+        pl_vulkan_release_ex(vulkan_->gpu, &release);
+        held_ = false;
+    }
+
     [[nodiscard]] bool fail(std::string message) {
         last_error_ = std::move(message);
         return false;
@@ -300,6 +336,7 @@ private:
 
     void destroy() noexcept {
         if (vulkan_ != nullptr) {
+            release_from_importer(VK_NULL_HANDLE);
             if (render_completed_ != VK_NULL_HANDLE)
                 pl_vulkan_sem_destroy(vulkan_->gpu, &render_completed_);
             if (available_ != VK_NULL_HANDLE)
@@ -327,6 +364,7 @@ private:
     pl_tex planes_[2]{};
     VkSemaphore render_completed_{VK_NULL_HANDLE};
     VkSemaphore available_{VK_NULL_HANDLE};
+    bool held_{};
     pl_handle render_completed_handle_{.fd = -1};
     pl_handle available_handle_{.fd = -1};
     ExportedSurface exported_;
