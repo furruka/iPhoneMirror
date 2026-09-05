@@ -534,9 +534,48 @@ Valeria 接口**只有一个 alt setting、只有两个 bulk 端点**，所以
 相同的 PING、写成功（URB 完成即设备已 ACK）、然后 `SYNC CWPA` 不来。
 
 接线层面已经全部排除：接口对、端点对、claim 成功、`clear_halt` 成功、回复字节正确。
-所以问题在会话语义上，而**每做一次实验要重启一次设备**——这才是当前真正的成本。因此
-下一步是先修 teardown（无需设备的代码工作）：只要会话能被干净关掉，每个开机周期就不
-再只有一次机会，迭代成本才降下来。
+所以问题在会话语义上。
+
+#### 已测：usbmuxd 开着也没用（但这一轮没能证伪 lockdown 假设）
+
+一轮**不 mask usbmuxd** 的运行（重启后的第一次会话，代码是修好守卫、发 clear_halt 的
+版本）：结果与 mask 时**完全一样**——PING 进、字节相同的回复出、然后沉默。
+
+但它**没有真正检验那条假设**，因为 usbmuxd 从未在配置 5 上建立会话。它的日志：
+
+```
+17:35:30 Removed device 1 on location 0x30037     ← 我们重枚举时它的会话死了
+17:35:30 usbmuxd shutting down                    ← -z/socket activation 导致重启
+17:35:30 usbmuxd v1.1.1 starting up
+17:35:30 Could not set configuration 4 for device 3-56: LIBUSB_ERROR_BUSY
+17:35:30 Initialization complete                  ← 放弃了这个设备
+```
+
+所以这一轮的环境实际上等于「没有 mux 会话」。**要真正检验，必须让配置 5 的
+interface 1 上有一个活着的 mux 会话**，而 usbmuxd 1.1.1 不会这么做——`usbmuxd --help`
+里没有任何「不要改配置」的开关，只有 `-p/--no-preflight`（关 lockdownd preflight），
+不是我们要的。
+
+#### 估算更正：自己讲 mux 不是「一百行探针」
+
+先前把「claim interface 1、发一条 usbmux `ListDevices` 看 iOS 反应」估成约一百行，
+**这个估算是错的**。`ListDevices` 是 usbmuxd **守护进程**的 API，不是 USB 线上的东西。
+线上要做的是：USBMUX 自己的版本握手 → 类 TCP 通道连到 lockdown 的 62078 端口 → 用
+`/var/lib/lockdown` 里的 pair record 做 TLS。这是一整套协议栈，不是探针。
+
+#### 一个一直被假设掉的前提：没人验证过 Windows 在这台设备、这个系统版本上能用
+
+「Windows 就可以」是对上游产品在**某个** iOS 版本上的印象，不是在 iPad Air M3 /
+iPadOS 27 Beta 4 上的实测。iOS 27 是 beta，如果 Apple 改了 Valeria 握手，Windows 同样
+会停在这里。**在为 lockdown 栈投入之前，先确认 Windows 基线**是更便宜的判据：
+
+- Windows 上也停 → 原因是 iOS 27，与 Linux 移植无关。
+- Windows 上正常 → 差异确实是环境性的，lockdown 那条路才值得走。
+
+#### 迭代成本
+
+**每做一次实验要重启一次设备**，这是当前真正的成本，也是为什么 teardown 必须修：只要
+会话能被干净关掉，每个开机周期就不再只有一次机会。
 
 
 同一条命令、同样干净的起点（`count=4`）、usbmuxd 同样 mask、`clear_halt` 同样两个端点
