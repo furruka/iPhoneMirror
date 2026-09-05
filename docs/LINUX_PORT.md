@@ -697,6 +697,50 @@ exported surface : memory_fd=65 done_fd=66 free_fd=67 vk_format=37
 **至此 M1 的整条链在真机数据上闭环**：USB 采集 → 解码（VAAPI）→ libplacebo 渲染 →
 导出 FD。只剩把 FD 导进 Avalonia 窗口（WP6）。
 
+#### 已落地：系统换成 usbmuxd-git，采集变成「什么都不用做」
+
+星翼授权后卸掉发行版的 `usbmuxd 1.1.1-4`，用 paru 装了 AUR 的
+`usbmuxd-git 1:1.1.1.r72.g3ded00c-1`（`pactree -r usbmuxd` 显示无反向依赖，所以替换是
+低风险的；`--noconfirm` 装不了有冲突的包，得先 `pacman -R` 再装）。
+
+装完之后系统 usbmuxd 自己就把事办了：
+
+```
+Found Valeria and Apple USB Multiplexor in device 3-59 configuration 5
+Switching device 3-59 mode to 1
+Found usbmux interface for device 3-59: 1
+Changing configuration of device 3-59: 4 -> 5        ← 它自己选了配置 5
+Connected to v2.0 device 1 ... serial 00008122-000161993C98401C
+```
+
+然后**什么都不用 mask、不用发 0x52、不用重启设备**，直接 `--no-cycle`：
+
+```
+configuration_was_set : no (already active)      ← 我们一发 SET_CONFIGURATION 都没送
+recovery              : ready=yes set_attempts=0 claim_attempts=1
+clear_halt            : both endpoints
+handshake state       : 1 → 2 → 3
+video                 : samples=697 bytes=41818146 parameter_sets=yes
+audio                 : packets=928 bytes=3801088
+outbound writes       : ok=789 failed=0
+```
+
+`set_attempts=0` 这一行是重点：**配置由 usbmuxd 选好，我们只 claim interface 2**——这就是
+Windows 上 AppleUsbFilter 那套安排的 Linux 等价物，而且是靠发行版组件实现的，不是靠我们
+去抢。
+
+#### 「每个开机周期只一次会话」的限制消失了
+
+不重启、不 mask，连续再跑两轮：第二轮干净地走完 `1 → 2 → 3`，10 秒 251 帧（约 25 fps）、
+零写失败。**所以那个限制本来就是半开会话的后果**，会话能正常建立和拆除之后它自己就没了。
+
+#### 新发现的小问题：紧邻上一轮启动会撞到上一轮的 teardown
+
+连续两轮里的第一轮落在 `handshake state : 5`（Stopped），只拿到 8 个样本，`bulk reads`
+里有 3 个包是上一轮尾巴上的数据。即**上一次会话的拆除还在飞的时候就开了新会话**。
+下一步要在启动时加一个 settle/drain：开始读之前把管道里的残留吃掉、并确认协议状态是
+`WaitingForPing`。这条现在很好测——不需要重启设备了。
+
 #### 关于「怎么让用户拿到能用的 usbmuxd」
 
 实验用的是本地构建、前台运行、系统 unit mask 掉的方式，**没有改动系统**。发行时的方案
