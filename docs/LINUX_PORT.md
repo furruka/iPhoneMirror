@@ -57,6 +57,7 @@ Linux 后端一律以新增文件实现。
 | P3-WP3 | `LinuxCoreApi.cpp` + `LinuxDeviceManager` + `LinuxEnvironmentProbe` + udev 规则 | `[x]` |
 | P3-WP4 | 重枚举恢复策略 + libudev 监视器 + 无头采集工具（USB 半边真机通过） | `[x]` |
 | P3 | Linux USB 采集出画（**已通过**：真机 849 帧视频 + 1164 个音频包落盘） | `[x]` |
+| P5-WP6d | `im_start_capture` 接上共享 `CaptureSession`，真机画面进 Avalonia 窗口 | `[x]` |
 | P4 | FFmpeg 解码 / libplacebo 渲染 / PipeWire 音频 | `[~]` |
 | P4-WP5A | `LinuxFFmpegVideoDecoder`：libavcodec 解码 + libswscale 转 NV12/P010 | `[x]` |
 | P4-WP5B | `LinuxPipeWireAudioRenderer`：PipeWire 播放，队列策略与 WASAPI 共享 | `[x]` |
@@ -1222,7 +1223,50 @@ USB 采集解耦才能在没有设备时验证。
 （此外第一次看到的「定格」还有一层原因：当时放的是真机采的 300 帧 iPad 桌面，而那段
 桌面本来就是静止的，看起来自然像单帧。）
 
-#### 下一步的真实工作量：不是「转发」，是 `im_start_capture` 还是个桩
+#### 已完成：`im_start_capture` 名副其实，真机画面进了窗口
+
+`LinuxCoreApi.cpp` 现在真的构造共享的 `CaptureSession` 并 `start(false)`
+（`use_usbdk` 恒为 false——UsbDk 是 Windows 后端，Linux 只会选到 LibUsb1），
+`im_stop_capture` 停它，`im_get_capture_status` 把 `Snapshot` 逐字段映射成
+`CaptureStatus`，`im_get_latest_video_timestamp` 报真实时间戳。
+`im_start_capture_with_options` 仍返回未实现，但理由改成「选项映射未做（P5b）」而不是
+「采集未做」——起会话却静默丢掉一半选项，正是这个文件拒绝报告的那种假成功。
+
+预览侧新增 `im_linux_preview_present_latest()`：从 `CaptureSession::next_render_frame()`
+的邮箱取最新帧直接 `present()`。跨翻译单元用 `LinuxCaptureBridge.h`，**返回帧而不是返回
+会话指针**——会话指针只在持锁期间有效，把裸指针递出去就是在等一次并发的
+`im_stop_capture` 变成 use-after-free。没有帧时返回 `DeviceNotFound` 而不是错误：握手和
+首个关键帧都要时间，按定时器轮询的调用方否则每个 tick 都会记一条失败。
+
+实测（`src/LinuxShell --device <udid>`）：
+
+```
+capturing 00008122-000161993C98401C…
+waiting for the first frame (125 polls)
+waiting for the first frame (250 polls)
+presented 1 / 2 / 3 / 60 / … / 5340 frames from 00008122-000161993C98401C
+```
+
+期间设备状态 `numcfg=5 active=5`——`CaptureSession` 自己发了 0x52，Valeria-aware 的
+usbmuxd 自己选了配置 5。**星翼确认窗口里就是 iPad 的实时画面。**
+
+#### 两个在这一步暴露的缺陷
+
+**一、32 位 `wchar_t` 的托管侧编码。** 第一次跑报
+`im_start_capture_ex returned -7: l`——错误信息只有一个字符。D2 决定在 Linux 上保留
+`wchar_t`，而 Linux 的 `wchar_t` 是 **32 位**，.NET 的宽字符串封送是 UTF-16，于是
+`libusb…` 被读成 `l` 就截断了，**传进去的序列号同样只剩一个字符**，所以设备找不到。
+新增 `Interop/NativeWide.cs` 用 `Encoding.UTF32` 手工封送两个方向。**这是 D2 在托管边界
+上的必然后果，之前没有任何调用方跨过这条边界所以没暴露。**
+
+**二、上下倒置。** 星翼一眼看出画面是倒的。Avalonia 的 importer 采样 Y 的方向与
+libplacebo 相反，S3 spike 当年用 `pl_swapchain_frame.flipped = true` 解决；我们不走
+swapchain，等价做法是把 target 的 crop 上下互换（`y0 > y1` 就是告诉 libplacebo 翻转）。
+**但这会让读回路径也翻转**，而 `RenderProbe` 是拿它和自顶向下的 CPU 参考比的——所以
+`read_back_rgba` 里把行序倒回来。改完 `RenderProbe` 仍是 `mean=0.873`，和翻转前一模一样，
+说明两处正好互相抵消。
+
+#### 转发接缝的记录（供后续参考）
 
 原本以为剩下的只是把解码帧转发给渲染器。查过之后要修正这个判断。
 

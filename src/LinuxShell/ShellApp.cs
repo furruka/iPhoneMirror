@@ -19,15 +19,17 @@ internal sealed class ShellApp : Application
     private static uint _width;
     private static uint _height;
     private static int _frameBudget;
+    private static string? _serial;
     private static Action<int> _report = _ => { };
 
     internal static void Configure(string path, uint width, uint height,
-        int frameBudget, Action<int> report)
+        int frameBudget, string? serial, Action<int> report)
     {
         _path = path;
         _width = width;
         _height = height;
         _frameBudget = frameBudget;
+        _serial = serial;
         _report = report;
     }
 
@@ -58,9 +60,18 @@ internal sealed class ShellApp : Application
             Background = Brushes.Black,
             Content = new Panel { Children = { preview, status } },
         };
-        var player = new FramePlayer(_path, _width, _height, _frameBudget);
-        preview.Ready += (_, _) => player.Start(preview, status, _report);
-        desktop.MainWindow.Closed += (_, _) => player.Stop();
+        if (_serial is null)
+        {
+            var player = new FramePlayer(_path, _width, _height, _frameBudget);
+            preview.Ready += (_, _) => player.Start(preview, status, _report);
+            desktop.MainWindow.Closed += (_, _) => player.Stop();
+        }
+        else
+        {
+            var player = new DevicePlayer(_serial);
+            preview.Ready += (_, _) => player.Start(preview, status, _report);
+            desktop.MainWindow.Closed += (_, _) => player.Stop();
+        }
         base.OnFrameworkInitializationCompleted();
     }
 }

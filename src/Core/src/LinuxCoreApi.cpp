@@ -15,11 +15,14 @@
 
 #include "iPhoneMirror/CoreApi.h"
 
+#include "Capture/CaptureSession.h"
 #include "Device/DeviceManager.h"
+#include "LinuxCaptureBridge.h"
 #include "Logging.h"
 #include "Text/Utf.h"
 
 #include <algorithm>
+#include <memory>
 #include <mutex>
 #include <string>
 
@@ -27,6 +30,8 @@ namespace {
 
 std::mutex state_mutex;
 bool initialized{};
+std::mutex capture_mutex;
+std::unique_ptr<iPhoneMirror::capture::CaptureSession> capture_session;
 std::wstring last_error;
 iPhoneMirror::device::DeviceManager device_manager;
 
@@ -179,25 +184,66 @@ std::int32_t IM_CALL im_refresh_devices_ex(iPhoneMirror::DeviceInfo* devices,
 
 const wchar_t* IM_CALL im_last_error() { return last_error.c_str(); }
 
-// Wired USB capture. The transport, the QuickTime handshake and the shared
-// capture state machine all exist on Linux; what is missing is the FFmpeg
-// decoder and the PipeWire renderer behind the media seams, so starting a
-// session would produce a stream with nowhere to decode it.
-std::int32_t IM_CALL im_start_capture(const wchar_t*) {
-    return not_implemented(L"有线投屏", L"WP4/WP5");
+// Wired USB capture. The shared capture state machine, the libusb-1.0 transport,
+// the FFmpeg decoder and the PipeWire renderer all exist on Linux now, so this
+// runs the real thing. use_usbdk is false unconditionally: UsbDk is a Windows
+// backend and CaptureSession only ever selects LibUsb1 here.
+//
+// A capable usbmuxd is a precondition rather than something this code arranges.
+// With one, the device is already in the capture configuration and claiming the
+// AV interface takes no contention; with usbmuxd 1.1.1 the daemon clamps its
+// configuration choice to 4, abandons the device, and iOS never opens a session.
+// See docs/LINUX_PORT.md.
+std::int32_t IM_CALL start_capture_locked(const wchar_t* serial, bool play_audio) {
+    if (serial == nullptr || *serial == L'\0')
+        return fail(iPhoneMirror::Result::InvalidArgument, L"serial 不能为空");
+    std::scoped_lock lock(capture_mutex);
+    if (capture_session) {
+        return fail(iPhoneMirror::Result::SessionAlreadyExists,
+            L"已有采集会话在运行");
+    }
+    try {
+        auto session = std::make_unique<iPhoneMirror::capture::CaptureSession>(
+            iPhoneMirror::text::wide_to_utf8(serial), play_audio);
+        session->start(false);
+        capture_session = std::move(session);
+        last_error.clear();
+        return static_cast<std::int32_t>(iPhoneMirror::Result::Ok);
+    } catch (const std::exception& error) {
+        capture_session.reset();
+        last_error = iPhoneMirror::text::utf8_to_wide(error.what());
+        return static_cast<std::int32_t>(
+            iPhoneMirror::Result::CaptureBackendUnavailable);
+    }
 }
 
-std::int32_t IM_CALL im_start_capture_ex(const wchar_t*, std::int32_t) {
-    return not_implemented(L"有线投屏", L"WP4/WP5");
+std::int32_t IM_CALL im_start_capture(const wchar_t* serial) {
+    return start_capture_locked(serial, true);
 }
 
+std::int32_t IM_CALL im_start_capture_ex(const wchar_t* serial,
+    std::int32_t play_audio) {
+    return start_capture_locked(serial, play_audio != 0);
+}
+
+// Only the options are unimplemented, not capture: mapping CaptureOptions field
+// by field is separate work, and starting while silently dropping half of them
+// would be exactly the kind of false success this file refuses to report.
 std::int32_t IM_CALL im_start_capture_with_options(const wchar_t*,
     const iPhoneMirror::CaptureOptions*) {
-    return not_implemented(L"有线投屏", L"WP4/WP5");
+    return not_implemented(L"带选项的采集启动", L"P5b");
 }
 
 std::int32_t IM_CALL im_stop_capture() {
-    return not_implemented(L"有线投屏", L"WP4/WP5");
+    std::scoped_lock lock(capture_mutex);
+    if (!capture_session) {
+        last_error.clear();
+        return static_cast<std::int32_t>(iPhoneMirror::Result::Ok);
+    }
+    capture_session->stop();
+    capture_session.reset();
+    last_error.clear();
+    return static_cast<std::int32_t>(iPhoneMirror::Result::Ok);
 }
 
 std::int32_t IM_CALL im_get_capture_status(iPhoneMirror::CaptureStatus* status) {
@@ -205,21 +251,44 @@ std::int32_t IM_CALL im_get_capture_status(iPhoneMirror::CaptureStatus* status) 
         return fail(iPhoneMirror::Result::InvalidArgument,
             L"CaptureStatus 结构版本不匹配");
     }
-    // A well-formed idle status is the honest answer: no session can exist yet.
     status->api_version = iPhoneMirror::ApiVersion;
-    status->state = iPhoneMirror::CaptureState::Idle;
-    status->width = 0;
-    status->height = 0;
-    status->fps = 0.0;
-    status->latency_ms = 0.0;
-    status->video_frames = 0;
-    status->audio_packets = 0;
-    status->audio_sample_rate = 0;
-    status->audio_channels = 0;
-    status->failure_kind = iPhoneMirror::CaptureFailureKind::None;
-    status->failure_stage = iPhoneMirror::CaptureFailureStage::None;
-    status->error_code = 0;
-    copy_text(status->message, L"Linux 版尚未实现采集（WP4/WP5）");
+    std::scoped_lock lock(capture_mutex);
+    if (!capture_session) {
+        // A well-formed idle status, not a failure: no session is running.
+        status->state = iPhoneMirror::CaptureState::Idle;
+        status->width = 0;
+        status->height = 0;
+        status->fps = 0.0;
+        status->latency_ms = 0.0;
+        status->video_frames = 0;
+        status->audio_packets = 0;
+        status->audio_sample_rate = 0;
+        status->audio_channels = 0;
+        status->failure_kind = iPhoneMirror::CaptureFailureKind::None;
+        status->failure_stage = iPhoneMirror::CaptureFailureStage::None;
+        status->error_code = 0;
+        copy_text(status->message, L"Idle");
+        last_error.clear();
+        return static_cast<std::int32_t>(iPhoneMirror::Result::Ok);
+    }
+    // Snapshot maps onto CaptureStatus one field at a time, so the shared state
+    // machine's own reporting is what the caller sees.
+    const auto snapshot = capture_session->snapshot();
+    status->state = static_cast<iPhoneMirror::CaptureState>(snapshot.state);
+    status->width = snapshot.width;
+    status->height = snapshot.height;
+    status->fps = snapshot.fps;
+    status->latency_ms = snapshot.latency_ms;
+    status->video_frames = snapshot.video_frames;
+    status->audio_packets = snapshot.audio_packets;
+    status->audio_sample_rate = snapshot.audio_sample_rate;
+    status->audio_channels = snapshot.audio_channels;
+    status->failure_kind =
+        static_cast<iPhoneMirror::CaptureFailureKind>(snapshot.failure_kind);
+    status->failure_stage =
+        static_cast<iPhoneMirror::CaptureFailureStage>(snapshot.failure_stage);
+    status->error_code = snapshot.error_code;
+    copy_text(status->message, snapshot.message);
     last_error.clear();
     return static_cast<std::int32_t>(iPhoneMirror::Result::Ok);
 }
@@ -228,7 +297,9 @@ std::int32_t IM_CALL im_get_latest_video_timestamp(std::int64_t* timestamp_100ns
     if (!timestamp_100ns) {
         return fail(iPhoneMirror::Result::InvalidArgument, L"timestamp 不能为空");
     }
-    *timestamp_100ns = 0;
+    std::scoped_lock lock(capture_mutex);
+    *timestamp_100ns = capture_session
+        ? capture_session->latest_frame_timestamp() : 0;
     last_error.clear();
     return static_cast<std::int32_t>(iPhoneMirror::Result::Ok);
 }
@@ -450,4 +521,11 @@ std::int32_t IM_CALL im_media_cast_request_stop() {
     return not_implemented(L"URL 视频停止", L"WP6 之后的 P6");
 }
 
+namespace iPhoneMirror::linux_bridge {
 
+std::shared_ptr<const media::DecodedFrame> latest_render_frame() {
+    std::scoped_lock lock(capture_mutex);
+    return capture_session ? capture_session->next_render_frame() : nullptr;
+}
+
+} // namespace iPhoneMirror::linux_bridge

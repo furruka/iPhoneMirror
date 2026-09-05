@@ -22,6 +22,7 @@ extern "C" {
 #include <format>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace iPhoneMirror::media {
@@ -198,6 +199,12 @@ public:
             static_cast<float>(height_)};
         // Letterbox rather than stretch: the phone's aspect ratio is the point.
         pl_rect2df_aspect_copy(&target.crop, &image.crop, 0.0F);
+        // Store the image bottom-up, because that is the orientation the importer
+        // samples in. Avalonia's importer reads Y opposite to libplacebo, which
+        // the S3 spike hit as an upside-down window and fixed the same way; a
+        // crop with y0 > y1 is how libplacebo is told to flip. read_back_rgba
+        // undoes it so the diagnostic path still returns top-down rows.
+        std::swap(target.crop.y0, target.crop.y1);
 
         if (!pl_render_image(renderer_, &image, &target,
                 &pl_render_default_params)) {
@@ -234,6 +241,19 @@ public:
         transfer.ptr = destination.data();
         if (!pl_tex_download(vulkan_->gpu, &transfer))
             return fail("pl_tex_download failed");
+
+        // The target holds the image bottom-up for the importer, so reverse the
+        // rows here: callers of this path compare against top-down references.
+        const auto row_bytes = static_cast<std::size_t>(width_) * 4U;
+        std::vector<std::uint8_t> scratch(row_bytes);
+        for (std::uint32_t row = 0; row < height_ / 2U; ++row) {
+            auto* top = destination.data() + row * row_bytes;
+            auto* bottom = destination.data() +
+                (static_cast<std::size_t>(height_) - 1U - row) * row_bytes;
+            std::memcpy(scratch.data(), top, row_bytes);
+            std::memcpy(top, bottom, row_bytes);
+            std::memcpy(bottom, scratch.data(), row_bytes);
+        }
         return true;
     }
 

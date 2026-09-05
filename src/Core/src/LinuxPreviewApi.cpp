@@ -6,6 +6,7 @@
 
 #include "iPhoneMirror/LinuxPreviewApi.h"
 
+#include "LinuxCaptureBridge.h"
 #include "Media/LinuxPlaceboRenderer.h"
 #include "Logging.h"
 #include "Text/Utf.h"
@@ -117,6 +118,30 @@ std::int32_t IM_CALL im_linux_preview_present_nv12(const std::uint8_t* data,
     frame.nv12.assign(data, data + required);
 
     if (!renderer->present(frame)) {
+        set_error(std::string(renderer->last_error()));
+        return static_cast<std::int32_t>(
+            iPhoneMirror::Result::CaptureBackendUnavailable);
+    }
+    preview_error.clear();
+    return static_cast<std::int32_t>(iPhoneMirror::Result::Ok);
+}
+
+std::int32_t IM_CALL im_linux_preview_present_latest() {
+    const auto frame = iPhoneMirror::linux_bridge::latest_render_frame();
+    if (!frame) {
+        // Not an error: the handshake and the first keyframe both take time, and
+        // a caller polling on a timer would otherwise log a failure per tick.
+        return static_cast<std::int32_t>(iPhoneMirror::Result::DeviceNotFound);
+    }
+    std::scoped_lock lock(preview_mutex);
+    if (!renderer) {
+        set_error("no preview is open");
+        return static_cast<std::int32_t>(
+            iPhoneMirror::Result::CaptureBackendUnavailable);
+    }
+    // The mailbox hands out an immutable frame, so presenting it needs no copy
+    // and no lock beyond the one already held.
+    if (!renderer->present(*frame)) {
         set_error(std::string(renderer->last_error()));
         return static_cast<std::int32_t>(
             iPhoneMirror::Result::CaptureBackendUnavailable);

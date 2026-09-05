@@ -66,3 +66,10 @@ IM_API std::int32_t IM_CALL im_linux_preview_describe(
 IM_API std::int32_t IM_CALL im_linux_preview_present_nv12(
     const std::uint8_t* data, std::uint64_t size, std::uint32_t width,
     std::uint32_t height);
+
+// Presents the running capture session's newest decoded frame. Returns Ok when a
+// frame was rendered, DeviceNotFound when the session has produced none yet
+// (which is normal while the handshake runs, not an error the caller should
+// report), and CaptureBackendUnavailable when there is no preview or the render
+// failed.
+IM_API std::int32_t IM_CALL im_linux_preview_present_latest();

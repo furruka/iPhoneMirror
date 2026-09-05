@@ -51,6 +51,38 @@ internal static partial class CorePreview
     internal static unsafe partial int PresentNv12(byte* data, ulong size,
         uint width, uint height);
 
+    [LibraryImport(Library, EntryPoint = "im_linux_preview_present_latest")]
+    internal static partial int PresentLatest();
+
+    [LibraryImport(Library, EntryPoint = "im_initialize")]
+    internal static partial int Initialize();
+
+    // IntPtr, not string: see NativeWide. wchar_t is 32 bits here and .NET's
+    // wide marshalling is UTF-16, so a marshalled string arrives truncated.
+    [LibraryImport(Library, EntryPoint = "im_start_capture_ex")]
+    private static partial int StartCaptureNative(IntPtr serial, int playAudio);
+
+    internal static int StartCapture(string serial, int playAudio)
+    {
+        var buffer = NativeWide.Allocate(serial);
+        try
+        {
+            return StartCaptureNative(buffer, playAudio);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    [LibraryImport(Library, EntryPoint = "im_stop_capture")]
+    internal static partial int StopCapture();
+
+    [LibraryImport(Library, EntryPoint = "im_last_error")]
+    private static partial IntPtr LastErrorPointer();
+
+    internal static string LastError() => NativeWide.Read(LastErrorPointer());
+
     // Throws rather than returning a flag: a layout mismatch has no safe
     // continuation, and the numbers belong in the message.
     internal static void CheckAbi()

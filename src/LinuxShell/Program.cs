@@ -22,11 +22,18 @@ internal static class Program
 
     private static int Main(string[] arguments)
     {
+        if (arguments.Length >= 2 && arguments[0] == "--device")
+        {
+            return RunDevice(arguments[1],
+                arguments.Length >= 4 ? arguments[2..4] : null);
+        }
         if (arguments.Length < 3)
         {
             Console.Error.WriteLine(
                 "usage: iPhoneMirror.LinuxShell <frames.nv12> <width> <height> "
-                + "[--frames N]");
+                + "[--frames N]\n"
+                + "       iPhoneMirror.LinuxShell --device <udid> "
+                + "[<width> <height>]");
             return 64;
         }
         var path = arguments[0];
@@ -52,8 +59,32 @@ internal static class Program
             {
                 RenderingMode = new[] { X11RenderingMode.Vulkan },
             })
-            .AfterSetup(_ => ShellApp.Configure(path, width, height, budget,
+            .AfterSetup(_ => ShellApp.Configure(path, width, height, budget, null,
                 code => _exitCode = code))
+            .StartWithClassicDesktopLifetime(Array.Empty<string>());
+        return _exitCode;
+    }
+
+    // The preview target defaults to the highest encoder tier verified on both
+    // test devices; the device decides the source geometry and Core letterboxes
+    // into whatever target it is given.
+    private static int RunDevice(string serial, string[]? geometry)
+    {
+        uint width = 1206;
+        uint height = 2622;
+        if (geometry is { Length: 2 })
+        {
+            _ = uint.TryParse(geometry[0], out width);
+            _ = uint.TryParse(geometry[1], out height);
+        }
+        AppBuilder.Configure<ShellApp>()
+            .UsePlatformDetect()
+            .With(new X11PlatformOptions
+            {
+                RenderingMode = new[] { X11RenderingMode.Vulkan },
+            })
+            .AfterSetup(_ => ShellApp.Configure(string.Empty, width, height, 0,
+                serial, code => _exitCode = code))
             .StartWithClassicDesktopLifetime(Array.Empty<string>());
         return _exitCode;
     }

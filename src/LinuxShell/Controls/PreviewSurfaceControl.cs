@@ -211,6 +211,19 @@ internal sealed class PreviewSurfaceControl : Control
             Diagnostic = $"im_linux_preview_present_nv12 returned {status}";
             return false;
         }
+        return await CommitAsync();
+    }
+
+    // Hands whatever Core last rendered to the compositor. Separate from
+    // PresentAsync because the device path renders through the session's own
+    // frame mailbox and only needs this half.
+    internal async Task<bool> CommitAsync()
+    {
+        if (!_ready) return NotReady("the control never became ready");
+        if (_surface is null) return NotReady("no drawing surface");
+        if (_importedImage is null) return NotReady("no imported image");
+        if (_renderCompleted is null) return NotReady("no render-completed semaphore");
+        if (_available is null) return NotReady("no available semaphore");
         try
         {
             await _surface.UpdateWithSemaphoresAsync(_importedImage,
