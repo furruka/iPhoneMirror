@@ -62,7 +62,7 @@ Linux 后端一律以新增文件实现。
 | P4-WP5B | `LinuxPipeWireAudioRenderer`：PipeWire 播放，队列策略与 WASAPI 共享 | `[x]` |
 | P4-WP5C | VAAPI 硬件解码，失败一律退回软解；与软解逐位相同 | `[x]` |
 | P4-WP5D1 | `LinuxPlaceboRenderer`：NV12/P010 → libplacebo → RGBA，与 CPU 色彩数学一致 | `[x]` |
-| P4-WP5D2 | 导出 dmabuf + Vulkan 信号量给 Avalonia 导入 | `[ ]` |
+| P4-WP5D2 | 导出内存 FD + 双向 Vulkan 信号量（Avalonia 导入端属 WP6） | `[x]` |
 | P5 | Avalonia GUI（P5a 最小外壳进 M1，P5b 全量对齐随后） | `[ ]` |
 | P6 | UxPlay 引擎无线接收 | `[ ]` |
 | P7 | 打包、CI、文档 | `[ ]` |
@@ -963,6 +963,33 @@ mean ≤ 1 个通道步进，因为超过它就意味着两边对色彩描述的
 
 肉眼复核了产出的 PPM：`testsrc2` 的色条顺序正确（红/绿/黄/蓝/洋红/青）、斜扫线连续无
 撕裂、左上角时间码在**上方**（没有 S3 那个垂直镜像问题）、1170×2532 竖屏比例正确。
+
+#### 第二步：导出内存 FD 与双向信号量（已通过）
+
+`ExportedSurface` 给出外部 Vulkan 导入方需要的全部东西：内存 FD、**两个**信号量 FD、
+`VkFormat`、分配大小与偏移。FD 的所有权留在渲染器手里，生命周期跟着它；导入方要更长的
+生命周期就自己 `dup()`。
+
+**两个方向的信号量是关键**，不是一个：`render_completed` 由渲染器发信、导入方等它之后
+才采样；`available` 由导入方发信、渲染器等它之后才再动这张图。少了任何一个，导入方都会
+采到画了一半的图。
+
+平台不支持导出时（`export_caps.tex/sync` 不含 `PL_HANDLE_FD`）**不当致命错误**：
+`exported_surface().valid == false`，读回路径照常工作。诚实报告比假装成功有用。
+
+本机实测：
+
+```
+exported surface      : memory_fd=65 done_fd=66 free_fd=67 vk_format=37 size=12124160 offset=0
+vs CPU colour maths   : mean=0.873 worst=163 at (1147,1256)
+verdict               : PASS
+```
+
+`vk_format=37` 即 `VK_FORMAT_R8G8B8A8_UNORM`；分配大小 12,124,160 大于
+1170×2532×4 = 11,849,760，是行距/平铺对齐的正常结果。
+
+**并且加了导出之后读回结果与之前那一轮逐字节相同**——导出没有扰动渲染路径。这是这一步
+能拿到的最强验证；真正把 FD 导入窗口是 WP6 的事。
 
 CI 只**构建**不运行它：托管 runner 没有可用 GPU，而
 `make_placebo_preview_renderer` 在那种情况下抛异常而不是假装成功。

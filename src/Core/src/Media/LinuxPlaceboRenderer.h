@@ -21,6 +21,27 @@
 
 namespace iPhoneMirror::media {
 
+// Everything an external Vulkan importer needs to bind the rendered image. The
+// file descriptors stay owned by the renderer and are valid for its lifetime;
+// an importer that needs its own lifetime must dup() them.
+struct ExportedSurface {
+    bool valid{};
+    int memory_fd{-1};
+    // Signalled by the renderer when a frame is finished; the importer waits on
+    // it before sampling.
+    int render_completed_fd{-1};
+    // Signalled by the importer when it is done; the renderer waits on it before
+    // touching the image again.
+    int available_fd{-1};
+    std::uint32_t width{};
+    std::uint32_t height{};
+    // Vulkan format enumerator, passed straight through so the importer does not
+    // have to re-derive it from the layout.
+    std::uint32_t vk_format{};
+    std::uint64_t allocation_size{};
+    std::uint64_t allocation_offset{};
+};
+
 class ILinuxPreviewRenderer {
 public:
     virtual ~ILinuxPreviewRenderer() = default;
@@ -31,6 +52,9 @@ public:
     // Downloads the target as tightly packed 8-bit RGBA. The span must hold
     // target_width() * target_height() * 4 bytes.
     [[nodiscard]] virtual bool read_back_rgba(std::span<std::uint8_t> destination) = 0;
+    // Empty (valid == false) when the platform cannot export the image, which is
+    // reported rather than treated as fatal: readback still works.
+    [[nodiscard]] virtual ExportedSurface exported_surface() const noexcept = 0;
 
     [[nodiscard]] virtual std::uint32_t target_width() const noexcept = 0;
     [[nodiscard]] virtual std::uint32_t target_height() const noexcept = 0;

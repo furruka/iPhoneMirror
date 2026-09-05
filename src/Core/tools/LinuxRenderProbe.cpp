@@ -98,6 +98,18 @@ int main(int argc, char** argv) {
     std::printf("target                : %ux%u\n", renderer->target_width(),
         renderer->target_height());
 
+    const auto surface = renderer->exported_surface();
+    if (surface.valid) {
+        std::printf("exported surface      : memory_fd=%d done_fd=%d free_fd=%d "
+                    "vk_format=%u size=%llu offset=%llu\n",
+            surface.memory_fd, surface.render_completed_fd, surface.available_fd,
+            surface.vk_format,
+            static_cast<unsigned long long>(surface.allocation_size),
+            static_cast<unsigned long long>(surface.allocation_offset));
+    } else {
+        std::printf("exported surface      : unavailable on this platform\n");
+    }
+
     if (!renderer->present(frame)) {
         std::fprintf(stderr, "present failed: %.*s\n",
             static_cast<int>(renderer->last_error().size()),

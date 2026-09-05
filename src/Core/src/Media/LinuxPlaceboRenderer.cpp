@@ -95,11 +95,20 @@ public:
         }
         target_params.renderable = true;
         target_params.host_readable = true;
+        target_params.sampleable = true;
+        // Exportable when the platform allows it. Not fatal if it does not: the
+        // readback path is what the acceptance tool uses, and a machine that
+        // cannot share a Vulkan image should say so rather than refuse to render.
+        const bool can_export =
+            (vulkan_->gpu->export_caps.tex & PL_HANDLE_FD) != 0 &&
+            (vulkan_->gpu->export_caps.sync & PL_HANDLE_FD) != 0;
+        if (can_export) target_params.export_handle = PL_HANDLE_FD;
         target_ = pl_tex_create(vulkan_->gpu, &target_params);
         if (target_ == nullptr) {
             destroy();
             throw std::runtime_error("pl_tex_create failed for the preview target");
         }
+        if (can_export) export_surface();
 
         renderer_ = pl_renderer_create(log_, vulkan_->gpu);
         if (renderer_ == nullptr) {
@@ -198,6 +207,10 @@ public:
         return true;
     }
 
+    [[nodiscard]] ExportedSurface exported_surface() const noexcept override {
+        return exported_;
+    }
+
     [[nodiscard]] std::uint32_t target_width() const noexcept override {
         return width_;
     }
@@ -249,7 +262,48 @@ private:
         return true;
     }
 
+    // Publishes the shared memory handle libplacebo already produced for the
+    // target, plus one semaphore in each direction. The pair is what makes the
+    // handover safe: without them an importer would sample a half-drawn image.
+    void export_surface() noexcept {
+        struct pl_vulkan_sem_params semaphore_params = {};
+        semaphore_params.type = VK_SEMAPHORE_TYPE_BINARY;
+        semaphore_params.export_handle = PL_HANDLE_FD;
+        semaphore_params.out_handle = &render_completed_handle_;
+        render_completed_ = pl_vulkan_sem_create(vulkan_->gpu, &semaphore_params);
+        if (render_completed_ == VK_NULL_HANDLE) return;
+        semaphore_params.out_handle = &available_handle_;
+        available_ = pl_vulkan_sem_create(vulkan_->gpu, &semaphore_params);
+        if (available_ == VK_NULL_HANDLE) return;
+
+        // The importer needs the exact VkFormat rather than a guess derived from
+        // the layout, and unwrapping is how libplacebo reports it.
+        VkFormat vk_format{};
+        (void)pl_vulkan_unwrap(vulkan_->gpu, target_, &vk_format, nullptr);
+
+        exported_.memory_fd = target_->shared_mem.handle.fd;
+        exported_.render_completed_fd = render_completed_handle_.fd;
+        exported_.available_fd = available_handle_.fd;
+        exported_.allocation_size = target_->shared_mem.size;
+        exported_.allocation_offset = target_->shared_mem.offset;
+        exported_.width = width_;
+        exported_.height = height_;
+        exported_.vk_format = static_cast<std::uint32_t>(vk_format);
+        exported_.valid = exported_.memory_fd >= 0 &&
+            exported_.render_completed_fd >= 0 && exported_.available_fd >= 0;
+    }
+
     void destroy() noexcept {
+        if (vulkan_ != nullptr) {
+            if (render_completed_ != VK_NULL_HANDLE)
+                pl_vulkan_sem_destroy(vulkan_->gpu, &render_completed_);
+            if (available_ != VK_NULL_HANDLE)
+                pl_vulkan_sem_destroy(vulkan_->gpu, &available_);
+        }
+        destroy_textures();
+    }
+
+    void destroy_textures() noexcept {
         if (vulkan_ != nullptr) {
             for (auto& plane : planes_) pl_tex_destroy(vulkan_->gpu, &plane);
             pl_tex_destroy(vulkan_->gpu, &target_);
@@ -266,6 +320,11 @@ private:
     pl_renderer renderer_{};
     pl_tex target_{};
     pl_tex planes_[2]{};
+    VkSemaphore render_completed_{VK_NULL_HANDLE};
+    VkSemaphore available_{VK_NULL_HANDLE};
+    pl_handle render_completed_handle_{.fd = -1};
+    pl_handle available_handle_{.fd = -1};
+    ExportedSurface exported_;
     std::string device_name_;
     std::string last_error_;
 };
