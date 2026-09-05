@@ -386,6 +386,20 @@ RecoveryOutcome recover_quicktime_configuration(device::UdevAppleMonitor& monito
     return outcome;
 }
 
+// Hex for the first bytes of a frame. Counting packets told us the handshake
+// stalls; only the bytes can say why, so verbose runs print both directions.
+void dump_frame(const char* label, std::span<const std::uint8_t> bytes) {
+    constexpr std::size_t Limit = 48;
+    const auto shown = std::min(bytes.size(), Limit);
+    std::printf("%-22s: %zu bytes", label, bytes.size());
+    for (std::size_t index = 0; index < shown; ++index) {
+        if (index % 16 == 0) std::printf("\n  ");
+        std::printf("%02x ", bytes[index]);
+    }
+    if (shown < bytes.size()) std::printf("... (+%zu)", bytes.size() - shown);
+    std::printf("\n");
+}
+
 // Opens the QuickTime endpoint, runs the upstream handshake state machine and
 // writes every sample it yields to disk. The protocol side is the shared
 // SessionProtocol, so a success here also proves the handshake works on Linux.
@@ -453,6 +467,8 @@ int stream_to_disk(const Options& options,
         if (count != 0) {
             bytes_read += count;
             ++reads_with_data;
+            if (options.verbose && reads_with_data <= 8)
+                dump_frame("inbound", std::span(read_buffer).first(count));
         }
         if (count == 0) {
             // Recovery for an endpoint that never starts talking, with the same
@@ -506,6 +522,8 @@ int stream_to_disk(const Options& options,
             for (const auto& response : event.outbound) {
                 // Reported rather than swallowed: the device answering while the
                 // host cannot answer back is the exact failure being diagnosed.
+                if (options.verbose && outbound_written < 8)
+                    dump_frame("outbound", response);
                 std::string write_diagnostic;
                 if (connection.write(response, 1000, write_diagnostic)) {
                     ++outbound_written;
