@@ -1222,9 +1222,26 @@ USB 采集解耦才能在没有设备时验证。
 （此外第一次看到的「定格」还有一层原因：当时放的是真机采的 300 帧 iPad 桌面，而那段
 桌面本来就是静止的，看起来自然像单帧。）
 
-**下一个增量**：把 `CaptureSession` 的解码输出接到同一个渲染器上。Core 侧的解码器和
-渲染器都已经各自验过，缺的只是中间那条转发——`im_linux_preview_present_nv12` 是给这一步
-之前用的临时入口，流式路径会直连渲染器而不走它。
+#### 下一步的真实工作量：不是「转发」，是 `im_start_capture` 还是个桩
+
+原本以为剩下的只是把解码帧转发给渲染器。查过之后要修正这个判断。
+
+**转发的接缝已经现成**：`CaptureSession::next_render_frame()` 返回一个不可变的
+latest-frame 邮箱（`std::shared_ptr<const media::DecodedFrame>`），注释写明「所有预览窗口
+读同一个邮箱，这里做破坏性 FIFO 会让多窗口渲染器拿到过期的 GPU 引用」。所以预览侧只要
+轮询它、拿到新帧就 `present()` 即可，不需要新的分发机制。
+
+**但 Linux 上还没有活的会话可轮询**：`LinuxCoreApi.cpp` 里 `im_start_capture` /
+`im_start_capture_ex` 仍然返回 `not_implemented(L"有线投屏", L"WP4/WP5")`，而无头工具是
+**直接驱动 `SessionProtocol`** 的，没走 `CaptureSession`。
+
+所以 M1 最后一件事的实际内容是：**把已经各自验过的四块（USB claim、`SessionProtocol`
+握手、FFmpeg 解码器、libplacebo 渲染器）在 Linux 侧组装成一个真正的会话，让
+`im_start_capture` 名副其实**，然后预览侧轮询 `next_render_frame()`。这比「加一条转发」大，
+但每一块的行为都已经在真机或离线验过，属于组装而不是探索。
+
+`im_linux_preview_present_nv12` 是这一步之前的临时入口，组装完成后流式路径直连渲染器，
+不再需要它。
 
 ### v1 明确不包含
 
