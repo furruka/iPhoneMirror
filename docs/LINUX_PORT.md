@@ -593,6 +593,54 @@ usbmuxd_log(LL_NOTICE, "Found Valeria and Apple USB Multiplexor in device %i-%i 
 - 对发行的影响：Linux 版需要在文档里写明「需要支持 Valeria 的 usbmuxd（git master
   之后）」。这比要求用户装打过补丁的私有版本干净得多。
 
+#### 两个命题，只有一个被证明了
+
+必须分清，因为我上一轮把它们混着说了：
+
+1. **已证明（代码级）**：usbmuxd 1.1.1 把 `desired_config` clamp 到 4，所以它**不可能**
+   在配置 5 上共存。
+2. **未证明**：iOS 需要一个活着的 lockdown/mux 会话才肯发 `SYNC CWPA`。
+
+如果第 2 条是假的，那换新 usbmuxd 对我们这个卡死**毫无帮助**，真正的原因仍然未知。
+所以实验的价值是双向的：中了就修好了，没中就便宜地砍掉一整个分支。
+
+#### 实验环境已就绪，且没有改动系统
+
+usbmuxd git master 已在 `/tmp/ipm_muxd` 本地构建完成（`1.1.1-git-3ded00c`，
+`--prefix=/tmp/ipm_muxd/prefix`），**没有装进系统、没有动 pacman**。这比装 AUR 包更轻：
+测试时把系统 usbmuxd mask 掉、前台跑我们这份，测完 unmask，除此之外无残留。
+
+#### 打包方式：几个方案与代价（待星翼拍板）
+
+星翼提出「客户端自带一个 usbmuxd 也不是不行」。前提约束是：**usbmuxd 设计上是单例**
+——它独占 `/var/run/usbmuxd`、由 udev 激活、还专门有 `--exit`/`-X` 用来让已在运行的实例
+退出。两个实例会抢同一批设备。
+
+**方案 A：要求系统上的 usbmuxd 支持 Valeria。**
+优点：不打包、单一守护进程、符合 Linux 打包惯例、其它 iOS 工具照常工作。
+缺点：**upstream 至今没有带这段代码的 release**（1.1.1 是 2020 年的最新 tag），
+Debian/Ubuntu/Fedora 稳定版用户无法满足，实际上等于长期挡住大部分发行版。
+
+**方案 B：自带 usbmuxd，采集期间跑自己那份。**
+做法就是现在测试脚本干的事：停掉并 mask 系统守护进程 → 跑我们的 → 退出时恢复。
+优点：不管发行版带的是哪个版本都能用、自洽。
+缺点：**我们运行期间这台机器上其它 iOS 工具全部失效**（照片导入、libimobiledevice……）；
+需要 root 去停系统服务；要防 udev 把系统那份重新拉起；还要自己构建维护一份 GPL 守护进程。
+
+**方案 D：不用 usbmuxd，自己讲 mux/lockdown。** 只有在第 2 条成立、且 A 和 B 都不可接受时
+才值得——成本是那套 USBMUX + 62078 + pair record TLS 协议栈。
+
+**倾向 A，B 作为兜底**，理由不是打包洁癖，而是这个项目自己的既定立场。
+`IPhoneFilterDriverService.cs` 上有一句注释写得很清楚：
+
+> The WPF process intentionally never installs or mutates drivers.
+
+Windows 侧的做法是**检查驱动状态并告知用户**，而不是偷偷替换。Linux 侧对等的做法就是
+**检测 usbmuxd 能力并在环境报告里说明**，而不是默默替换用户的守护进程。B 作为可选模式
+提供给满足不了 A 的发行版是合理的，但不该是默认。
+
+**这个决定可以等实验之后再做**——如果第 2 条是假的，整个讨论就不成立。
+
 #### 待验证
 
 装上 `usbmuxd-git` 之后重启设备再跑一轮。判据是 usbmuxd 日志里出现
