@@ -5,6 +5,7 @@
 
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Input;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Layout;
 using Avalonia.Media;
@@ -71,7 +72,48 @@ internal sealed class ShellApp : Application
             var player = new DevicePlayer(_serial);
             preview.Ready += (_, _) => player.Start(preview, status, _report);
             desktop.MainWindow.Closed += (_, _) => player.Stop();
+            AttachReverseControl(desktop.MainWindow, preview);
         }
         base.OnFrameworkInitializationCompleted();
     }
+
+    // Reverse control is attached only in device mode: pointing at a file would
+    // move the real iPad while the window showed something unrelated, which is a
+    // good way to tap things by accident.
+    private static void AttachReverseControl(Window window, Control preview)
+    {
+        var hid = new Services.BluezHidService();
+        var bridge = new Services.HidInputBridge(hid)
+        {
+            DisplayedWidth = _width,
+            DisplayedHeight = _height,
+        };
+        _ = hid.StartAsync("iPhoneMirror Linux").ContinueWith(task =>
+            Console.WriteLine($"reverse control : {(task.Result ? "ready" : hid.Diagnostic)}"),
+            TaskScheduler.Default);
+
+        preview.PointerMoved += (_, e) => bridge.PointerMoved(e.GetPosition(preview));
+        preview.PointerExited += (_, _) => bridge.PointerLost();
+        preview.PointerPressed += (_, e) =>
+        {
+            preview.Focus();
+            bridge.ButtonChanged(ButtonIndex(e.GetCurrentPoint(preview)), true);
+        };
+        preview.PointerReleased += (_, e) =>
+            bridge.ButtonChanged(ButtonIndex(e.GetCurrentPoint(preview)), false);
+        preview.PointerWheelChanged += (_, e) => bridge.Wheel(e.Delta.Y);
+        window.KeyDown += (_, e) => bridge.KeyChanged(e.Key, true, e.KeyModifiers);
+        window.KeyUp += (_, e) => bridge.KeyChanged(e.Key, false, e.KeyModifiers);
+        window.Closed += (_, _) => _ = hid.DisposeAsync();
+    }
+
+    private static int ButtonIndex(PointerPoint point) =>
+        point.Properties.PointerUpdateKind switch
+        {
+            PointerUpdateKind.RightButtonPressed or
+                PointerUpdateKind.RightButtonReleased => 1,
+            PointerUpdateKind.MiddleButtonPressed or
+                PointerUpdateKind.MiddleButtonReleased => 2,
+            _ => 0,
+        };
 }

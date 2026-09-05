@@ -1449,6 +1449,41 @@ BlueZ 的对应写法是 `encrypt-read` / `encrypt-notify`。**iOS 会在没有�
 跑完了**，星翼去看的时候早已结束——于是得到一个假的负面结论。改成 60 单位步长、按秒数
 持续扫描之后才看得见。**验证动作本身的可观察时长也要算进设计里。**
 
+##### 预览窗口的鼠标/键盘已接到 HID 报告
+
+`Services/HidInputBridge.cs`：Avalonia 的指针/按键事件 → HID 报告。
+
+**鼠标报告是相对量而不是绝对坐标**——描述符里 X/Y 标的是 `0x81, 0x06`
+（Data|Variable|Relative），所以这里发的是增量，永远不需要知道指针在设备上的位置。
+反过来说，从窗口取绝对坐标去发就是错的：光标是 iOS 自己在移。
+
+方向映射走 `BluetoothMouseOrientationMapper`——**和 Windows 用的是同一个文件**（链接编译，
+不是副本），所以旋转过的预览在两个平台上行为一致。
+
+键盘发的是 HID usage ID 而不是扫描码，而且**只映射镜像真正需要的键**：没映射的键什么都
+不发，而不是发一个可能错的 usage——发错比不发更糟。
+
+反控只在 `--device` 模式挂上。指着文件播放时不挂：那会让真机被一个显示着别的内容的窗口
+操作，很容易误触。
+
+采集与反控同时跑通（一个进程里，USB 与蓝牙互不干扰）：
+
+```
+capturing 00008122-000161993C98401C…
+reverse control : ready
+presented 120 frames from 00008122-000161993C98401C
+ActiveInstances: 1
+```
+
+顺带修掉一个自己造的 bug：`AttachReverseControl` 被挂了两次（改文件时同一个替换命中了两处），
+于是起了两个 `BluezHidService`、两份广播、每个动作发两遍报告。
+
+##### 一条关于测试脚手架的教训
+
+多次「命令没有任何输出、日志文件也不存在」是我自己造成的：复合命令开头写了
+`pkill -f iPhoneMirror.LinuxShell`，而 **`pkill -f` 会匹配到它自己所在的那条命令行**，
+于是把正在跑整条复合命令的 shell 一起杀了。排查时差点以为是程序启动失败。
+
 ##### 剩下的是真机闸门
 
 `Appearance` 用 `0x03C1`（Keyboard）。Feature report（id 3）**故意没导出**——目前没有任何
