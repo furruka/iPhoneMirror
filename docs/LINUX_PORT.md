@@ -49,14 +49,14 @@ Linux 后端一律以新增文件实现。
 | P0 | fork 声明、许可合规、SPDX 基线 | `[x]` |
 | P1 | CMake 跨平台化；可移植模块在 Linux 编过并通过测试 | `[x]` |
 | P1-WP1 | 纯机械抽取：`VideoFormats.h`/`VideoFrameCopy.cpp`、`PcmBufferPolicy.{h,cpp}`、`Text/Utf`、`Socket` 跨平台 + AF_UNIX、`QtUsbTransport` 裁剪 | `[x]` |
-| P1-S1 | spike：libusb 只读枚举 + 读隐藏配置描述符（**需真机**） | `[~]` |
-| P1-S2 | spike：AF_UNIX usbmux `ListDevices`（**需真机**） | `[~]` |
+| P1-S1 | spike：libusb 只读枚举 + 读隐藏配置描述符 | `[x]` |
+| P1-S2 | spike：AF_UNIX usbmux `ListDevices` | `[x]` |
 | P1-S3 | spike：Avalonia 嵌入原生 surface | `[x]` |
 | P1-S4 | spike：解码 → dmabuf → libplacebo 出画并测延迟 | `[x]` |
 | P2 | `CaptureSession.cpp` 抽缝共享（方案 X；`wchar_t` 保留，`ApiVersion` 保持 18） | `[x]` |
 | P3-WP3 | `LinuxCoreApi.cpp` + `LinuxDeviceManager` + `LinuxEnvironmentProbe` + udev 规则 | `[x]` |
-| P3-WP4 | 重枚举恢复策略 + libudev 监视器 + 无头采集工具（**真机未验**） | `[~]` |
-| P3 | Linux USB 采集（无头验证优先，**需真机**） | `[ ]` |
+| P3-WP4 | 重枚举恢复策略 + libudev 监视器 + 无头采集工具（USB 半边真机通过） | `[x]` |
+| P3 | Linux USB 采集出画（**受阻**：bulk OUT 写恒超时，需 iPhone 继续调） | `[!]` |
 | P4 | FFmpeg 解码 / libplacebo 渲染 / PipeWire 音频 | `[ ]` |
 | P5 | Avalonia GUI（P5a 最小外壳进 M1，P5b 全量对齐随后） | `[ ]` |
 | P6 | UxPlay 引擎无线接收 | `[ ]` |
@@ -133,26 +133,31 @@ LD_LIBRARY_PATH=build/linux/src/Core \
 `im_start_capture` 稳定返回 `-7` 并说明由 WP4/WP5 负责。`uaccess` 的 ACL 是否
 真的落到 `/dev/bus/usb` 节点上**未验证**，要等 WP4 的真机闸门。
 
-### WP4：重枚举恢复（设计已就绪，**真机未验**）
+### WP4：重枚举恢复（**已真机验证**）
 
 这是 §4.1 那条最高风险约束的对策。Windows 不需要它：AppleUsbFilter 会保留
-0x52 选中的配置。Linux 上 usbmuxd 的 `39-usbmuxd.rules` 含
-`ACTION=="add", ATTR{bConfigurationValue}="0"`，所以设备每次重新出现，udev 都把
-活动配置写回 0，`libusb_claim_interface` 随即失败——**主机必须自己重发
-SET_CONFIGURATION**。
+0x52 选中的配置。
 
-- `Capture/UsbReenumerationPolicy.h`：纯状态机。要求 QuickTime 配置在**连续两次
-  采样**中都活着才允许 claim（一次 udev 处理窗口过去了才算稳定），把重发次数
-  限死在 5 次，并**统计配置被覆盖的次数**——那个计数就是这条 HYPOTHESIS 的证据。
-  单测 `UsbReenumerationPolicyTests` 覆盖了分类优先级、稳定性要求、覆盖计数、
-  预算耗尽后不谎报成功。
+**这里有一条对交接文档的事实更正。** 交接文档写的是「usbmuxd 的
+`39-usbmuxd.rules` 含 `ACTION=="add", ATTR{bConfigurationValue}="0"`，所以 udev 把
+活动配置写回 0」。实测**不是这样**：我们丢配置时被写成的值是 **4**（设备的普通
+最高配置），而且把 usbmuxd stop 掉之后配置 5 能无限期留住。**真正的竞争者是
+usbmuxd 守护进程本身，不是那条 udev 规则。** 所以对策不是「跟 udev 抢」，而是
+「在 usbmuxd 还没 claim 之前把 claim 做完」，见下面的 14 ms 时序。
+
+- `Capture/UsbReenumerationPolicy.h`：纯状态机，把重发次数限死在 5 次，并
+  **统计配置被覆盖的次数**。`StableSamplesBeforeClaim = 1`——**这里也改过**：原本
+  要求连续两次采样都看到 QuickTime 配置才允许 claim，实测那一次等待就足以输掉
+  竞争，所以看到一次就必须立刻 claim。单测 `UsbReenumerationPolicyTests` 覆盖了
+  分类优先级、覆盖计数、预算耗尽后不谎报成功。
 - `Device/LinuxUdevMonitor.{h,cpp}`：libudev netlink 监听。轮询 libusb 只能回答
   「设备在不在」，答不了「它刚刚重新出现」，而后者才是要抓的那个边沿。
   `bConfigurationValue` 从 sysfs 读，**不需要打开设备**，所以在 udev 还没授权
   节点的窗口里也读得到。用 devpath 末段（端口链）作为跨重枚举的稳定身份——地址
   和 product id 都会变。
-- `Transport/LinuxUsbConfiguration.{h,cpp}`：Linux 专用的 SET_CONFIGURATION。
-  `LIBUSB_ERROR_BUSY` 表示内核驱动（usbmuxd）还占着接口，是预期竞争而非故障。
+- `Transport/LinuxUsbConfiguration.{h,cpp}`：Linux 专用的 SET_CONFIGURATION 与
+  `ClaimedQuickTimeInterface`。`LIBUSB_ERROR_BUSY` 表示 usbmuxd 还占着接口，
+  是预期竞争而非故障。
 - `tools/LinuxHeadlessCapture.cpp`（`-DIPHONEMIRROR_BUILD_DANGEROUS_USB_TOOLS=ON`
   才构建）：跑完整链路并把裸流写盘——**不解码、不渲染、不开窗**。这样 USB 半边
   可以独立验证，不必等 FFmpeg 解码器；一个能被任意播放器打开的文件也比预览窗口
@@ -167,9 +172,12 @@ cmake --build build/linux
     --serial <udid> --seconds 15 --verbose
 ```
 
-**未验证项（全部等真机）**：0x52 后 udev 是否真的把配置写回 0、写回几次；
-重发 SET_CONFIGURATION 能否让配置留住；usbmuxd 是否会抢回设备；
-`uaccess` ACL 是否覆盖 `/dev/bus/usb` 节点；握手状态机在 iOS 27 Beta 4 上的行为。
+**已验证项**（详见下面的真机实测各节）：`uaccess` ACL 确实落到 `/dev/bus/usb`
+节点；`0x52 wIndex=2` 确实重枚举并追加采集配置；重发 SET_CONFIGURATION + 原子
+claim 能拿住配置；usbmuxd 确实会抢设备且抢不到就彻底放弃；握手状态机在
+iOS 27 Beta 4 上能推进过 `WaitingForPing`。
+
+**仍未验证**：bulk OUT 写为什么恒超时。
 
 ### WP4 真机实测（2026-09-05，iPad Air M3 / iPadOS 27 Beta 4）
 
@@ -315,11 +323,60 @@ data toggle，对刚武装的端点可能让 OUT 管道与设备错开。Windows
 #### 仍未解决
 
 1. **bulk OUT 写恒为 `LIBUSB_ERROR_TIMEOUT`**，包括收到 PING 那一次。IN 通 OUT 不通
-   的单向失败原因未定。
-2. **拿不到可重复的武装窗口**。`0x52 wIndex=2` 在配置 5 已存在时是空操作；
-   `0x52 wIndex=0` 虽然回 acknowledged，但 15 秒内配置 5 不消失（更早的一次是几分钟
-   后才消失），拔插数据线也不会让 iPhone 回到 4 个配置。所以「先 disable 再 enable」
-   这条软件路径目前不可靠。
+   的单向失败原因未定。**只能在会武装 Valeria 的设备（iPhone）上继续调。**
+2. **iPad Air M3 不武装 Valeria。** 见下方受控实验。
+
+#### 受控实验：所有变量都控住之后，iPad 仍然零字节
+
+一轮把每个已知变量都固定的运行（2026-09-05）：
+
+| 变量 | 取值 |
+|---|---|
+| 起始状态 | `count=4`，干净（本次运行自己开窗） |
+| usbmuxd | `systemctl mask` + stop，**无竞争** |
+| 屏幕 | 已解锁亮屏（用户确认） |
+| set + claim | 原子完成，`set_attempts=1 claim_attempts=1 configuration_was_set=yes` |
+| `clear_halt` | 不发 |
+| 握手时序 | 等设备先发 PING |
+
+结果：`bulk reads: with_data=0 bytes=0 packets=0`，30 秒零字节。
+
+```
+device                : serial=00008122000161993C98401C pid=12ab port=3-2
+configurations        : count=4 highest=4 expected_qt=5
+quicktime descriptor  : absent
+0x52 acknowledged     : yes
+recovery              : ready=yes set_attempts=1 overwrites=0 claim_attempts=1
+endpoints             : config=5 interface=2 alt=0 in=0x84 out=0x03 in_packet=512 out_packet=512
+configuration_was_set : yes
+clear_halt            : not issued on Linux
+handshake kick        : ok
+video                 : samples=0 bytes=0 parameter_sets=no
+outbound writes       : ok=0 failed=0
+ping attempts         : 14
+bulk reads            : with_data=0 bytes=0 packets=0
+handshake final state : 4 (0=WaitingForPing)
+```
+
+注意 `overwrites=0`：无竞争时没有任何人把配置写回去，所以这一轮我们**确实**独占
+着已武装的接口，读到零字节不是因为被别人抢走。
+
+**结论：这是设备/系统级差异，不是代码路径问题。** iPhone 16 Pro（iOS 27 Beta 4）
+会主动发 PING，iPad Air M3（iPadOS 27 Beta 4）在同一套代码、同样干净的窗口里
+不发。后续调 OUT 写超时必须用 iPhone。
+
+#### 关于「怎么复位」的事实更正
+
+早先记的「拔插数据线能让设备回到基础配置集」是**错的**。实测两台设备都是：
+**采集配置跨拔插存活**。唯一能让它消失的是 `0x52 wIndex=0`，而且该请求立刻回
+acknowledged，配置却要**一分钟量级**之后才真正消失。所以：
+
+- 拔插不是复位手段。
+- 每轮运行前的复位必须是「发 disable → 轮询等配置数掉回去」，工具里的等待上限
+  因此设为 180 秒。
+
+这条纠正很重要：它解释了之前多次「0x52 acknowledged 但没有重枚举」——那些运行
+里采集配置本就还在，wIndex=2 是空操作，于是从来没有窗口。
 
 P1 的构建结论：`src/Core` 的 5 个可移植翻译单元（Protocol / Media / CoreMedia / H264）
 在 GCC 16.2 与 Clang 22.1 下都能构建出 `libiPhoneMirror.Core.so`，`ctest` 3/3 通过

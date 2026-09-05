@@ -623,21 +623,25 @@ int main(int argc, char** argv) {
         std::printf("configurations        : count=%u highest=%u expected_qt=%u\n",
             device->configuration_count, device->highest_configuration_value,
             identity.expected_quicktime_configuration);
-        std::printf("quicktime descriptor  : %s\n",
-            device->quicktime_configuration ? "present" : "absent");
-
         const bool quicktime_active = device->active_configuration_known &&
             identity.expected_quicktime_configuration != 0 &&
             device->active_configuration ==
                 identity.expected_quicktime_configuration;
+        std::printf("quicktime descriptor  : %s%s\n",
+            device->quicktime_configuration ? "present" : "absent",
+            quicktime_active ? " (and active)" : "");
 
         // iOS arms the Valeria endpoints only for a short window after the
         // configuration switch, and 0x52 wIndex=2 is a no-op once the
-        // configuration is already exposed. Measured on an iPhone 16 Pro: the
-        // extra configuration survives unplugging the cable, so the only way to
-        // reach a fresh window is to disable first and let the device
-        // re-enumerate without it.
-        if (!quicktime_active && device->quicktime_configuration) {
+        // configuration is already exposed. So whenever the extra configuration
+        // exists this run has to remove it and put it back, including when it is
+        // the active one: claiming an already-active configuration arrives long
+        // after its window closed. Measured on both an iPad Air M3 and an
+        // iPhone 16 Pro: the extra configuration survives unplugging the cable,
+        // and 0x52 wIndex=0 is acknowledged immediately but the configuration
+        // only disappears around a minute later. That request is the reset, and
+        // it has to be waited out rather than replaced by a replug.
+        if (device->quicktime_configuration) {
             std::printf("disabling the QuickTime configuration first "
                         "(0x52 wIndex=0) so a fresh window can open\n");
             bool disable_acknowledged{};
@@ -651,7 +655,8 @@ int main(int argc, char** argv) {
             std::printf("0x52 wIndex=0         : %s\n",
                 disable_acknowledged ? "acknowledged" : "not acknowledged");
             // Wait for the device to come back without the extra configuration.
-            const auto reset_deadline = Clock::now() + std::chrono::seconds(15);
+            const auto reset_started = Clock::now();
+            const auto reset_deadline = reset_started + std::chrono::seconds(180);
             bool reset_seen{};
             while (Clock::now() < reset_deadline) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -667,25 +672,24 @@ int main(int argc, char** argv) {
                 }
                 if (reset_seen && present) break;
             }
-            std::printf("configuration reset   : %s\n",
-                reset_seen ? "yes" : "no (the extra configuration is still there)");
+            std::printf("configuration reset   : %s (waited %llds)\n",
+                reset_seen ? "yes" : "no (the extra configuration is still there)",
+                static_cast<long long>(std::chrono::duration_cast<
+                    std::chrono::seconds>(Clock::now() - reset_started).count()));
         }
 
-        if (!quicktime_active) {
-            // 0x52 with wIndex=2 asks iOS to expose the hidden capture
-            // configuration and detaches the device. Sent even when the
-            // descriptor is already present, because that detach is the only
-            // moment SET_CONFIGURATION can succeed: once usbmuxd has claimed an
-            // interface the request returns LIBUSB_ERROR_BUSY.
-            std::printf("forcing re-enumeration (0x52 wIndex=2) to open the "
-                        "configuration window\n");
-            const bool acknowledged =
-                transport::QtUsbConnection::enable_quicktime_configuration(
-                    preflight, identity);
-            std::printf("0x52 acknowledged     : %s\n",
-                acknowledged ? "yes" : "no (re-enumeration is the authority)");
-            detach_expected = true;
-        }
+        // 0x52 with wIndex=2 asks iOS to expose the hidden capture configuration
+        // and detaches the device. That detach is also the only moment
+        // SET_CONFIGURATION can succeed, because once usbmuxd has claimed an
+        // interface the request returns LIBUSB_ERROR_BUSY.
+        std::printf("forcing re-enumeration (0x52 wIndex=2) to open the "
+                    "configuration window\n");
+        const bool acknowledged =
+            transport::QtUsbConnection::enable_quicktime_configuration(
+                preflight, identity);
+        std::printf("0x52 acknowledged     : %s\n",
+            acknowledged ? "yes" : "no (re-enumeration is the authority)");
+        detach_expected = true;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "preflight failed: %s\n", error.what());
         return 1;
