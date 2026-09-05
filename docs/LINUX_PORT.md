@@ -56,7 +56,7 @@ Linux 后端一律以新增文件实现。
 | P2 | `CaptureSession.cpp` 抽缝共享（方案 X；`wchar_t` 保留，`ApiVersion` 保持 18） | `[x]` |
 | P3-WP3 | `LinuxCoreApi.cpp` + `LinuxDeviceManager` + `LinuxEnvironmentProbe` + udev 规则 | `[x]` |
 | P3-WP4 | 重枚举恢复策略 + libudev 监视器 + 无头采集工具（USB 半边真机通过） | `[x]` |
-| P3 | Linux USB 采集出画（**受阻**：bulk OUT 写恒超时，需 iPhone 继续调） | `[!]` |
+| P3 | Linux USB 采集出画（**受阻**：握手在第一次交换后停，两台设备一致） | `[!]` |
 | P4 | FFmpeg 解码 / libplacebo 渲染 / PipeWire 音频 | `[~]` |
 | P4-WP5A | `LinuxFFmpegVideoDecoder`：libavcodec 解码 + libswscale 转 NV12/P010 | `[x]` |
 | P4-WP5B | `LinuxPipeWireAudioRenderer`：PipeWire 播放，队列策略与 WASAPI 共享 | `[x]` |
@@ -356,13 +356,12 @@ usbDevice.Control(0x02, 0x01, 0, uint16(inboundBulkEndpointAddress), make([]byte
 **这条推翻了我先前「Linux 上不发 clear_halt」的改动。** 那个改动基于一条
 HYPOTHESIS（重置 data toggle 会让刚武装的 OUT 管道和设备错开），而一个跑得通的
 实现做的恰好相反，且把它放在 streaming 前的必经路径上。已恢复，默认发，保留
-`--no-clear-halt` 供真机 A/B。
+`--no-clear-halt` 供真机 A/B。**该 A/B 已经做了，结果是决定性的**：不发 clear_halt
+一个字节都收不到，发了 PING 就来——见下面那一节。
 
-**由此得到 OUT 超时的首选假设（HYPOTHESIS，未验证）**：data toggle 不同步。
-如果端点是 STALL，libusb 会返回 `LIBUSB_ERROR_PIPE`；我们拿到的是
-`LIBUSB_ERROR_TIMEOUT`，而 toggle 错位的表现正是设备一直 NAK、主机重试到超时。
-`CLEAR_FEATURE(ENDPOINT_HALT)` 会把两侧 toggle 都复位成 DATA0——这是主机唯一能
-同步一个自己读不到的 toggle 的手段。**验证需要一台会武装 Valeria 的设备。**
+**已验证：`CLEAR_FEATURE(ENDPOINT_HALT)` 是必需步骤。** 先前对 OUT 超时提的
+「data toggle 不同步」假设方向对了一半：clear_halt 确实是缺失的那一步，但它解决的是
+**IN 完全不出数据**，而第一次写之后的 OUT 超时是另一个问题，见下。
 
 对照里确认一致、不用改的部分：按 subclass 找接口而不是按 index；alt setting 在
 claim 时就选 0，没有单独的 SET_INTERFACE；主机被动等 ping，不先发；读帧是 4 字节
@@ -370,48 +369,49 @@ claim 时就选 0，没有单独的 SET_INTERFACE；主机被动等 ping，不�
 
 #### 仍未解决
 
-1. **bulk OUT 写恒为 `LIBUSB_ERROR_TIMEOUT`**，包括收到 PING 那一次。首选假设见
-   上面的 ③。**只能在会武装 Valeria 的设备（iPhone）上继续调。**
-2. **iPad Air M3 不武装 Valeria。** 见下方受控实验。
+**第一次交换之后握手就停**，两台设备表现一致：收到设备的 16 字节 PING、第一条出站
+消息写成功之后，IN 再无数据、后续写全部 `LIBUSB_ERROR_TIMEOUT`。首选假设是我们回给
+PING 的那条消息不被接受、设备据此拆掉了 Valeria 会话（因为两个方向是同时停的）。
+**不需要特定设备，iPad 就能继续验。**
 
-#### 受控实验：所有变量都控住之后，iPad 仍然零字节
+#### 决定性实验：不是 iPad 不兼容，是我们漏了 `clear_halt`
 
-一轮把每个已知变量都固定的运行（2026-09-05）：
+**先前这一节写的「iPad Air M3 不武装 Valeria、是 iPadOS 与 iOS 的行为差异」是错的，
+在此撤回。** 那个结论建立在一个没控住的变量上：iPhone 那轮**发了** `clear_halt`，
+iPad 那轮**没发**（当时刚按一条错误假设把它去掉）。设备不是唯一的差异项。
 
-| 变量 | 取值 |
-|---|---|
-| 起始状态 | `count=4`，干净（本次运行自己开窗） |
-| usbmuxd | `systemctl mask` + stop，**无竞争** |
-| 屏幕 | 已解锁亮屏（用户确认） |
-| set + claim | 原子完成，`set_attempts=1 claim_attempts=1 configuration_was_set=yes` |
-| `clear_halt` | 不发（此轮如此；该决定后来被撤回） |
-| 握手时序 | 等设备先发 PING |
-
-结果：`bulk reads: with_data=0 bytes=0 packets=0`，30 秒零字节。
+把 `clear_halt` 恢复后，**同一台 iPad、同一份代码、usbmuxd 同样 mask**，重跑：
 
 ```
-device                : serial=00008122000161993C98401C pid=12ab port=3-2
-configurations        : count=4 highest=4 expected_qt=5
-quicktime descriptor  : absent
-0x52 acknowledged     : yes
-recovery              : ready=yes set_attempts=1 overwrites=0 claim_attempts=1
-endpoints             : config=5 interface=2 alt=0 in=0x84 out=0x03 in_packet=512 out_packet=512
-configuration_was_set : yes
-clear_halt            : not issued on Linux
+clear_halt            : both endpoints
+handshake state       : 1                              ← 越过 WaitingForPing(0)
 handshake kick        : ok
-video                 : samples=0 bytes=0 parameter_sets=no
-outbound writes       : ok=0 failed=0
-ping attempts         : 14
-bulk reads            : with_data=0 bytes=0 packets=0
-handshake final state : 4 (0=WaitingForPing)
+bulk reads            : with_data=1 bytes=16 packets=1 ← 16 字节 PING 到了
+outbound writes       : ok=1 failed=0                  ← 一次写成功
+handshake final state : 4 (Stopping)
 ```
 
-注意 `overwrites=0`：无竞争时没有任何人把配置写回去，所以这一轮我们**确实**独占
-着已武装的接口，读到零字节不是因为被别人抢走。
+对照上一轮（唯一差异是不发 clear_halt）：`bulk reads: with_data=0 bytes=0
+packets=0`、`handshake final state: 4` 但从未离开过状态 0。
 
-**结论：这是设备/系统级差异，不是代码路径问题。** iPhone 16 Pro（iOS 27 Beta 4）
-会主动发 PING，iPad Air M3（iPadOS 27 Beta 4）在同一套代码、同样干净的窗口里
-不发。后续调 OUT 写超时必须用 iPhone。
+**结论：`CLEAR_FEATURE(ENDPOINT_HALT)` 是必需步骤，不是可选的恢复手段。** 不发就
+一个字节都收不到。参考实现把它放在 streaming 前唯一的控制传输位置上是对的，我先前
+「重置 data toggle 会让刚武装的 OUT 管道错开」那条假设是错的。**iPad Air M3 与
+iPhone 16 Pro 行为一致，两台都能进握手。**
+
+#### 当前真正的阻塞点：第一次交换之后就停
+
+两台设备现在的表现相同，卡在同一处：
+
+- 设备发来 16 字节 PING，状态从 `WaitingForPing` 推进到 `WaitingForAudioClock`。
+- 协议产生的第一条出站消息**写成功**（`outbound writes: ok=1`）。
+- 之后 30 秒里 IN 再无数据（`packets=1` 就是那个 PING），而后续 ping 写全部
+  `LIBUSB_ERROR_TIMEOUT after 0 of 16`。
+
+即**第一次写成功、后续写超时，同时设备也不再说话**。两个方向同时停这一点值得注意：
+比起「OUT 管道单独坏了」，更像是设备在收到我们那条回复后把 Valeria 会话拆了。
+下一步应当核对我们回给 PING 的那条消息与参考实现逐字节是否一致，而不是继续调
+端点参数。这条**不需要**换设备，iPad 就能验。
 
 #### 关于「怎么复位」的事实更正
 
