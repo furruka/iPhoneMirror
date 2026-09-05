@@ -530,6 +530,75 @@ Valeria 接口**只有一个 alt setting、只有两个 bulk 端点**，所以
 `interface=2 alt=0 in=0x84 out=0x03` 是唯一可能的选择。「参考文档说有 4 个 bulk 端点、
 我们可能挑错了那一对」这条假设**彻底排除**。
 
+#### 根因找到了：usbmuxd 1.1.1 把配置号钉死在 4
+
+**这一条把前面所有关于 lockdown 协议栈的推测都作废了，而且修法便宜得多。**
+
+先看 Windows 那边到底是什么安排。`src/App/Services/IPhoneFilterDriverService.cs` 检查的
+是这三件事：
+
+```csharp
+service == "usbccgp"                       // 微软复合设备父驱动，原样保留
+UpperFilters 含 "libusb0"                  // 我们的访问只是一个上层过滤器
+LowerFilters 含 "AppleLowerFilter" / "AppleKmdfFilter"   // 苹果的过滤器原样保留
+```
+
+即 **Windows 上苹果的驱动栈完整保留，libusb0 只是加了一层上层过滤器来获得额外访问**。
+AMDS 的 lockdown 会话一直活着，我们同时也能说话。这也解释了星翼的观察——UsbDk 那类后端
+在 Windows 上和苹果驱动不兼容，因为它是**替换**驱动而不是加过滤器。
+
+Linux 上对应的安排本来天然可行：**usbmuxd 拿 interface 1（`FF/FE`），我们拿
+interface 2（`FF/2A`），同一个配置 5 的两个不同接口**——内核允许。
+
+那为什么不行？看 usbmuxd **1.1.1** 的 `src/usb.c`：
+
+```c
+int desired_config = devdesc.bNumConfigurations;
+if (desired_config > 4) {
+    desired_config = 4;          // ← 就是这一行
+}
+```
+
+采集配置存在时 `bNumConfigurations = 5`，本来 `desired_config` 就该是 5，**这个 clamp
+硬把它压回 4**。于是 usbmuxd 永远去抢配置 4、抢不到就放弃设备，lockdown 会话从来不存在。
+
+而 usbmuxd **master** 早就改了。它有个 `guess_mode()`，专门认 Valeria：
+
+```c
+if(intf->bInterfaceClass == INTERFACE_CLASS &&
+   intf->bInterfaceSubClass == 42 &&        // 0x2A
+   intf->bInterfaceProtocol == 255) {
+    has_valeria = 1;
+}
+...
+usbmuxd_log(LL_NOTICE, "Found Valeria and Apple USB Multiplexor in device %i-%i configuration 5", ...);
+```
+
+并且 `set_valid_configuration()` 是**从高到低**遍历配置的
+（`for(j = bNumConfigurations ; j > 0 ; j--)`），所以采集配置在时它会选**配置 5**，
+只 claim 自己的 interface 1，把 interface 2 留给我们。
+
+**这正是 Windows 那套安排的 Linux 等价物。**
+
+#### 结论与代价
+
+- **不需要写 lockdown 协议栈。** 那条路（USBMUX 版本握手 → 62078 → pair record TLS）
+  的前提是「Linux 上没法共存」，而共存不成立的唯一原因是 usbmuxd 1.1.1 的那行 clamp。
+- 修法是**版本要求**，不是打补丁：upstream 至今没有 1.1.1 之后的 tag，所以只能用 git
+  master。Arch 的 AUR 有 `usbmuxd-git`（`1:1.1.1.r47.g049877e`），已核实提交
+  `049877e`（2023-04-21）确实含 `guess_mode` / `has_valeria`。
+- **代价要讲清楚**：替换系统级 usbmuxd 会影响这台机器上**所有** iOS 设备访问
+  （libimobiledevice、GNOME 的照片导入、Steam 之类都走它）。它是可回滚的
+  （`pacman -S extra/usbmuxd` 装回），但属于系统组件变更，需要星翼同意。
+- 对发行的影响：Linux 版需要在文档里写明「需要支持 Valeria 的 usbmuxd（git master
+  之后）」。这比要求用户装打过补丁的私有版本干净得多。
+
+#### 待验证
+
+装上 `usbmuxd-git` 之后重启设备再跑一轮。判据是 usbmuxd 日志里出现
+`Found Valeria and Apple USB Multiplexor in device ... configuration 5`，
+并且我们的握手能从 `WaitingForAudioClock` 走到 `Negotiating`。
+
 #### 剩下的问题，以及它为什么难迭代
 
 即使是开机后的第一次会话也停在 `WaitingForAudioClock`：设备发 PING、我们回一个字节
