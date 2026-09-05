@@ -59,6 +59,7 @@ Linux 后端一律以新增文件实现。
 | P3 | Linux USB 采集出画（**受阻**：bulk OUT 写恒超时，需 iPhone 继续调） | `[!]` |
 | P4 | FFmpeg 解码 / libplacebo 渲染 / PipeWire 音频 | `[~]` |
 | P4-WP5A | `LinuxFFmpegVideoDecoder`：libavcodec 解码 + libswscale 转 NV12/P010 | `[x]` |
+| P4-WP5B | `LinuxPipeWireAudioRenderer`：PipeWire 播放，队列策略与 WASAPI 共享 | `[x]` |
 | P5 | Avalonia GUI（P5a 最小外壳进 M1，P5b 全量对齐随后） | `[ ]` |
 | P6 | UxPlay 引擎无线接收 | `[ ]` |
 | P7 | 打包、CI、文档 | `[ ]` |
@@ -80,10 +81,11 @@ P2 共享 `CaptureSession.cpp`（方案 X，2402 行的握手状态机、看门�
 检测、解码器切换与视频队列预算现在两平台共用一份）：
 
 - 媒体后端改走接缝 `Media/IVideoDecoder.h` 与 `Audio/IAudioRenderer.h`，由
-  `Media/ActiveVideoDecoder.h` 的工厂按平台构造。Windows 仍是 Media Foundation
-  与 WASAPI；Linux 目前是 `LinuxMediaStubs.cpp`，解码器构造即抛
-  "not implemented yet (WP5)"，音频渲染器沿用同一套格式校验后静默丢弃。
-  **桩不会假装成功**——WP5 落地 FFmpeg 解码器与 PipeWire 渲染器时替换。
+  `Media/ActiveVideoDecoder.h` 的工厂按平台构造。Windows 是 Media Foundation
+  与 WASAPI；Linux 现在是 `Media/LinuxFFmpegVideoDecoder.cpp` 与
+  `Audio/LinuxPipeWireAudioRenderer.cpp`，平台选择留在
+  `Media/LinuxMediaBackends.cpp`（WP5 之前它叫 `LinuxMediaStubs.cpp`，装的是会抛
+  "not implemented yet" 的桩）。
 - libusb0/UsbDk 后端、`LibUsb0RestoreLease`、`restore_libusb0_configuration`
   与 PnP 观察全部包在 `#ifdef _WIN32` 内。`UsbBackend` 枚举保留三个取值，
   后端亲和性记账与诊断因此仍是一份代码，Linux 只会选到 `LibUsb1`。
@@ -432,8 +434,10 @@ P1 的构建结论：`src/Core` 的 5 个可移植翻译单元（Protocol / Medi
 ### WP5-A：libavcodec 视频解码器（已通过，无需设备）
 
 `src/Core/src/Media/LinuxFFmpegVideoDecoder.{h,cpp}` 实现 `IVideoDecoder`，替换掉
-`LinuxMediaStubs.cpp` 里那个会抛 "not implemented yet" 的桩。`LinuxMediaStubs.cpp`
-现在只剩音频桩和 `materialize_gpu_frame`。
+原 `LinuxMediaStubs.cpp` 里那个会抛 "not implemented yet" 的桩。那个文件已改名
+`LinuxMediaBackends.cpp`，现在只做平台选择；`materialize_gpu_frame` 单独拆到
+`LinuxSharedGpuFrame.cpp`，因为凡链接 `VideoFrameCopy.cpp` 的目标都需要它，而只有
+库需要那两个工厂——合在一起会把 PipeWire 拖进从不播音的工具里。
 
 三个不是库默认值的决定：
 
@@ -501,6 +505,53 @@ stride 计算都没有偏差——不是「看起来对」，是位级相同。
   硬件约束，接入是下一个增量。
 - HEVC 走的是同一套代码，但验收素材是 High 10 的 H.264：探针只解析 `avcC`，MP4 里
   的 HEVC 参数集在 `hvcC` 里，要验 HEVC 得先给探针加 `hvcC` 解析。
+
+### WP5-B：PipeWire 音频渲染器（已通过，无需设备）
+
+`src/Core/src/Audio/LinuxPipeWireAudioRenderer.{h,cpp}` 实现 `IAudioRenderer`。
+
+**队列决策不重写**：容量、startup / high-water 阈值、丢弃计划全部来自 WP1 抽出的
+`Audio/PcmBufferPolicy.h`——那次抽取的目的就是让两个平台对「迟到的包」「超大的包」
+做同样的判断。本文件里属于本地的只有环形缓冲的 memcpy 机械动作和 PipeWire 管线。
+
+增益也刻意对齐：同样的 1/10000 单位、同样在一个输出缓冲内做线性斜坡，所以调音量和
+静音切换在两个平台听起来一样，不会咔哒。**没有**走会话管理器的音量控制——那会让
+播放行为取决于装的是哪个管理器。
+
+格式只offer一种：`checked_wasapi_buffer_layout` 已经把可接受集合限定成交错的有符号
+PCM16，对应 `SPA_AUDIO_FORMAT_S16_LE`，没有第二种可谈。
+
+#### 验收：`src/Core/tools/LinuxAudioProbe.cpp`
+
+按设备发包的粒度（512 帧）实时推 440 Hz 正弦，读回计数器。判据是
+`rendered_frames` 在涨而 underrun 为 0——只有 PipeWire 图真的在从这个渲染器的环里
+取数据才可能这样，所以一次跑过就同时覆盖了连接、格式协商和 process 回调。
+
+```
+format                : 44100 Hz 2 ch s16le packet=512 frames
+while streaming       : active=yes queued=3303 rendered=127976 dropped=1329 underruns=0   ← 3 s
+while streaming       : active=yes queued=3482 rendered=349064 dropped=734  underruns=0   ← 8 s
+```
+
+**`dropped` 不是缺陷，而且已经验证过**：8 秒那轮的音频量是 3 秒的 2.7 倍，丢弃数却
+更少（734 < 1329）。丢弃不随时长增长，说明它全部发生在启动瞬间——PipeWire 协商流的
+那几十毫秒里 `process` 还没被调用，环先被填过 high-water（4096 帧），共享策略按设计
+丢掉了积压而不是把延迟一直背着。之后稳态是 0 丢弃 0 underrun，队列稳定在 3.3–3.5 k
+帧（约 75–79 ms）。
+
+#### 与 WASAPI 的一处已知差异
+
+WASAPI 侧拿不到输出端点时构造就失败，采集会话据此关掉音频。PipeWire 的
+`pw_stream_connect` 是异步的：没有守护进程时它照样返回成功，之后状态转到
+`PW_STREAM_STATE_ERROR`。所以这里**不**在构造函数里等——那需要凭空定一个超时常数。
+错误状态会写日志，`stats().active` 是给上层的真实信号。这是差异，不是等价实现。
+
+#### 一个留给星翼拍板的选项
+
+环形缓冲的 memcpy 机械动作现在在 WASAPI 与 PipeWire 两份文件里各有一份（各约
+15 行；所有*决策*逻辑已经共享）。要彻底去重就得把环本身从 `WasapiRenderer` 里抽出来，
+那不是「接口抽取」而是搬状态，属于对上游文件的结构性改动，需要 Windows CI 复验。
+**没有擅自做。** 现状是可接受的重复量。
 
 ### v1 明确不包含
 

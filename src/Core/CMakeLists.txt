@@ -47,13 +47,15 @@ else()
     # builds against the media seams; the video decoder is real, the audio
     # renderer is still a stub until the PipeWire backend lands.
     set(IPHONEMIRROR_CORE_LINUX_SOURCES
+        src/Audio/LinuxPipeWireAudioRenderer.cpp
         src/Device/LinuxAppleUsbDiscovery.cpp
         src/Device/LinuxDeviceManager.cpp
         src/Device/LinuxEnvironmentProbe.cpp
         src/Device/LinuxUdevMonitor.cpp
         src/Transport/LinuxUsbConfiguration.cpp
         src/Media/LinuxFFmpegVideoDecoder.cpp
-        src/Media/LinuxMediaStubs.cpp)
+        src/Media/LinuxMediaBackends.cpp
+        src/Media/LinuxSharedGpuFrame.cpp)
     set(IPHONEMIRROR_CORE_SOURCES
         ${IPHONEMIRROR_CORE_PORTABLE_SOURCES}
         ${IPHONEMIRROR_CORE_LINUX_SOURCES}
@@ -126,11 +128,15 @@ else()
     # NV12/P010 the DecodedFrame seam promises.
     pkg_check_modules(IPHONEMIRROR_FFMPEG REQUIRED IMPORTED_TARGET
         libavcodec libavutil libswscale)
+    # PipeWire plays what WASAPI plays on Windows.
+    pkg_check_modules(IPHONEMIRROR_PIPEWIRE REQUIRED IMPORTED_TARGET
+        libpipewire-0.3)
     target_link_libraries(iPhoneMirror.Core PRIVATE
         PkgConfig::IPHONEMIRROR_LIBUSB
         PkgConfig::IPHONEMIRROR_CRYPTO
         PkgConfig::IPHONEMIRROR_UDEV
-        PkgConfig::IPHONEMIRROR_FFMPEG)
+        PkgConfig::IPHONEMIRROR_FFMPEG
+        PkgConfig::IPHONEMIRROR_PIPEWIRE)
 endif()
 
 set_target_properties(iPhoneMirror.Core PROPERTIES
@@ -282,11 +288,10 @@ if(IPHONEMIRROR_BUILD_TESTS)
             libavformat)
         add_executable(iPhoneMirror.Linux.DecodeProbe
             tools/LinuxDecodeProbe.cpp
-            src/Audio/PcmBufferPolicy.cpp
             src/Media/CoreMedia.cpp
             src/Media/H264.cpp
             src/Media/LinuxFFmpegVideoDecoder.cpp
-            src/Media/LinuxMediaStubs.cpp
+            src/Media/LinuxSharedGpuFrame.cpp
             src/Media/VideoFrameCopy.cpp
             src/Protocol/QuickTimePacket.cpp)
         target_include_directories(iPhoneMirror.Linux.DecodeProbe PRIVATE
@@ -295,6 +300,23 @@ if(IPHONEMIRROR_BUILD_TESTS)
             iPhoneMirror.CompileOptions
             PkgConfig::IPHONEMIRROR_FFMPEG
             PkgConfig::IPHONEMIRROR_FFMPEG_FORMAT)
+
+        # WP5 acceptance tool for the audio half. Also device-free: it plays a
+        # generated tone through the real renderer and reports the counters.
+        add_executable(iPhoneMirror.Linux.AudioProbe
+            tools/LinuxAudioProbe.cpp
+            src/Audio/LinuxPipeWireAudioRenderer.cpp
+            src/Audio/PcmBufferPolicy.cpp
+            src/Logging.cpp
+            src/Media/CoreMedia.cpp
+            src/Protocol/QuickTimePacket.cpp
+            src/Text/Utf.cpp)
+        target_include_directories(iPhoneMirror.Linux.AudioProbe PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_link_libraries(iPhoneMirror.Linux.AudioProbe PRIVATE
+            iPhoneMirror.CompileOptions
+            PkgConfig::IPHONEMIRROR_PIPEWIRE
+            PkgConfig::IPHONEMIRROR_CRYPTO)
     endif()
 
     add_executable(iPhoneMirror.UsbConfigurationRestorePolicy.Tests
@@ -334,7 +356,8 @@ if(IPHONEMIRROR_BUILD_TESTS)
             PkgConfig::IPHONEMIRROR_LIBUSB
             PkgConfig::IPHONEMIRROR_CRYPTO
             PkgConfig::IPHONEMIRROR_UDEV
-            PkgConfig::IPHONEMIRROR_FFMPEG)
+            PkgConfig::IPHONEMIRROR_FFMPEG
+            PkgConfig::IPHONEMIRROR_PIPEWIRE)
     endif()
 
     if(IPHONEMIRROR_BUILD_DANGEROUS_USB_TOOLS AND WIN32)
