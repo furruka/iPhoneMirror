@@ -63,7 +63,8 @@ Linux 后端一律以新增文件实现。
 | P4-WP5C | VAAPI 硬件解码，失败一律退回软解；与软解逐位相同 | `[x]` |
 | P4-WP5D1 | `LinuxPlaceboRenderer`：NV12/P010 → libplacebo → RGBA，与 CPU 色彩数学一致 | `[x]` |
 | P4-WP5D2 | 导出内存 FD + 双向 Vulkan 信号量（Avalonia 导入端属 WP6） | `[x]` |
-| P5 | Avalonia GUI（P5a 最小外壳进 M1，P5b 全量对齐随后） | `[ ]` |
+| P5-WP6a | 预览 C ABI（`LinuxPreviewApi.h`，5 个导出，ABI 尺寸自校验） | `[x]` |
+| P5 | Avalonia GUI（P5a 最小外壳进 M1，P5b 全量对齐随后） | `[~]` |
 | P6 | UxPlay 引擎无线接收 | `[ ]` |
 | P7 | 打包、CI、文档 | `[ ]` |
 
@@ -1051,6 +1052,40 @@ verdict               : PASS
 
 CI 只**构建**不运行它：托管 runner 没有可用 GPU，而
 `make_placebo_preview_renderer` 在那种情况下抛异常而不是假装成功。
+
+### WP6 第一步：预览 C ABI（已通过，无需设备）
+
+`src/Core/include/iPhoneMirror/LinuxPreviewApi.h` + `src/Core/src/LinuxPreviewApi.cpp`。
+
+**为什么是新头文件而不是往 `CoreApi.h` 里加。** 共享头里的预览 API 是 HWND 形状的
+（`im_attach_preview_window(void* hwnd)`），而这个形状在 Linux 上没有诚实的实现——D1
+定的模型是把**导出的 Vulkan 图像**交给窗口，不是给窗口一个原生句柄让它自己画。加上
+「Linux 后端一律新增文件」这条规则，共享头的 `ApiVersion` 和现有接口面因此一行未动。
+
+五个导出：`im_linux_preview_abi_size` / `_open` / `_close` / `_describe` /
+`_present_nv12`。**尺寸自校验是从 S3 那次教训来的**——那次托管侧结构体比 native 小
+144 字节，`pms_describe` 静默越界写；现在托管侧启动时先比对 `abi_size`，不一致就明确
+报错退出，而不是踩内存。
+
+`im_linux_preview_present_nv12` 是为了让这层能在采集会话接上渲染器之前就被验证；真正
+的流式路径会直连渲染器，不走这个调用。
+
+#### 验收：走导出符号，而不是 C++ 接口
+
+`src/Core/tools/LinuxPreviewAbiProbe.cpp` 只 include 那个头、只链 `iPhoneMirror.Core`，
+调的是导出的 C 入口——ABI 可以在 C++ 接口不出错的地方出错，所以必须这样测。喂的是
+**真机采到的那一帧**（`LinuxDecodeProbe` 写出的裸 NV12）：
+
+```
+abi size              : library=48 caller=48 match
+surface               : valid=1 2360x1640 vk_format=37
+descriptors           : memory=65 done=66 free=67
+allocation            : size=15761408 offset=0
+present               : ok (0)
+verdict               : PASS
+```
+
+`nm -D` 确认五个符号都以默认可见性导出。
 
 ### v1 明确不包含
 

@@ -60,7 +60,8 @@ else()
     set(IPHONEMIRROR_CORE_SOURCES
         ${IPHONEMIRROR_CORE_PORTABLE_SOURCES}
         ${IPHONEMIRROR_CORE_LINUX_SOURCES}
-        src/LinuxCoreApi.cpp)
+        src/LinuxCoreApi.cpp
+        src/LinuxPreviewApi.cpp)
 endif()
 
 add_library(iPhoneMirror.Core SHARED ${IPHONEMIRROR_CORE_SOURCES})
@@ -305,6 +306,16 @@ if(IPHONEMIRROR_BUILD_TESTS)
             iPhoneMirror.CompileOptions
             PkgConfig::IPHONEMIRROR_FFMPEG
             PkgConfig::IPHONEMIRROR_FFMPEG_FORMAT)
+
+        # WP6 acceptance tool: exercises the preview C ABI the Avalonia shell
+        # will call, through the exported entry points rather than the C++ seam.
+        add_executable(iPhoneMirror.Linux.PreviewAbiProbe
+            tools/LinuxPreviewAbiProbe.cpp)
+        target_include_directories(iPhoneMirror.Linux.PreviewAbiProbe PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include)
+        target_link_libraries(iPhoneMirror.Linux.PreviewAbiProbe PRIVATE
+            iPhoneMirror.CompileOptions
+            iPhoneMirror.Core)
 
         # WP5 acceptance tool for the renderer. Device-free and window-free: it
         # renders a raw NV12 frame and compares the readback against the shared
