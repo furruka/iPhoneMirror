@@ -191,10 +191,14 @@ internal sealed class PreviewSurfaceControl : Control
     // Renders one NV12 frame through Core and hands the result to the compositor.
     internal async Task<bool> PresentAsync(byte[] frame, uint width, uint height)
     {
-        if (!_ready || _surface is null || _importedImage is null ||
-            _renderCompleted is null || _available is null) {
-            return false;
-        }
+        // One message per condition: the first attempt showed a black window with
+        // the status text unchanged, which is what a silent early return looks
+        // like from the outside.
+        if (!_ready) return NotReady("the control never became ready");
+        if (_surface is null) return NotReady("no drawing surface");
+        if (_importedImage is null) return NotReady("no imported image");
+        if (_renderCompleted is null) return NotReady("no render-completed semaphore");
+        if (_available is null) return NotReady("no available semaphore");
         int status;
         unsafe
         {
@@ -207,9 +211,24 @@ internal sealed class PreviewSurfaceControl : Control
             Diagnostic = $"im_linux_preview_present_nv12 returned {status}";
             return false;
         }
-        await _surface.UpdateWithSemaphoresAsync(_importedImage, _renderCompleted,
-            _available);
+        try
+        {
+            await _surface.UpdateWithSemaphoresAsync(_importedImage,
+                _renderCompleted, _available);
+        }
+        catch (Exception exception)
+        {
+            Diagnostic = $"UpdateWithSemaphoresAsync: {exception.GetType().Name}: "
+                + exception.Message;
+            return false;
+        }
         return true;
+    }
+
+    private bool NotReady(string reason)
+    {
+        Diagnostic = $"present skipped: {reason}";
+        return false;
     }
 
     private void Fail(StringBuilder report, string reason)

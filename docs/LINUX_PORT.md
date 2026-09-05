@@ -1168,12 +1168,32 @@ import image and semaphores: ok
 `presented N frames`。带 `--frames 30` 跑会挂住不退出（`timeout` 124 杀掉），说明
 **present 一次都没完成**。
 
-从代码路径看，最可能是 `PresentAsync` 在 `_ready`/句柄检查那里直接返回 false——那条路径
-不写 `Diagnostic`，所以状态文字保持旧值，正好是观察到的现象。**这是推断，不是结论**：
-下一步要在 `PresentAsync` 的每个提前返回上加各自的诊断字符串，先把「哪一个条件不成立」
-变成可观察的，再谈修。
+#### 加了诊断之后定位到了：Core 从不发信 `render_completed`
 
-**没有把这一步记成通过。** 已通的是 ABI、导入和设备 UUID；上屏没通。
+给 `PresentAsync` 每个提前返回加了各自的诊断串、给
+`UpdateWithSemaphoresAsync` 包了 try/catch、并把状态同时打到 stdout（**composition
+visual 一开始 present 就把窗口盖住，屏幕上那行字恰好在有内容可报时变得读不到**）。
+
+结果 stdout 只有四行初始化信息，**之后什么都没有**——既没有 `presented N frames`，也没有
+`present skipped: ...`，也没有异常。即控制流进了 `PresentAsync` 但**没有从
+`await UpdateWithSemaphoresAsync` 回来**。这也解释了带 `--frames` 跑会挂住。
+
+原因是**信号量死锁，而且缺口在我们这边**：compositor 等 `render_completed` 被发信才敢
+采样，而 Core 的 `present()` 只做了 `pl_render_image`，**从来没有发信那个信号量**。
+
+S3 spike 是这么做的（`PlaceboSurfaceShim.c:626-636`）：渲染完之后
+`pl_vulkan_hold_ex`，把 `hold_params.semaphore.sem` 设成 `render_completed`——**是 hold
+这一步把图像交出去并发信**；下一帧开头再 `pl_vulkan_release_ex`（等 `available`）拿回来。
+我把导出搬进 Core 时只搬了「创建并导出信号量」，漏了「用 hold/release 驱动它们」。
+
+所以 WP5-D2 那句「加了导出之后读回逐字节相同、没扰动渲染路径」是对的，但**不完整**：
+读回路径不需要 hold/release，导入路径需要。**只验证读回，验不出这个缺口。**
+
+下一步：在 `present()` 末尾加 `pl_vulkan_hold_ex`（signal = `render_completed`），在下一次
+`present()` 开头加 `pl_vulkan_release_ex`（wait = `available`），并且 `read_back_rgba` 要在
+持有期间先 release——否则读回会和 compositor 抢这张图。
+
+**没有把这一步记成通过。** 已通的是 ABI、导入、设备 UUID 和诊断可观察性；上屏没通。
 
 ### v1 明确不包含
 

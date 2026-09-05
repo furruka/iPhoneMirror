@@ -28,6 +28,7 @@ internal sealed class FramePlayer(string path, uint width, uint height,
         Action<int> report)
     {
         status.Text = preview.Diagnostic;
+        Console.WriteLine(preview.Diagnostic);
         try
         {
             _input = File.OpenRead(path);
@@ -51,12 +52,18 @@ internal sealed class FramePlayer(string path, uint width, uint height,
             if (!await preview.PresentAsync(_frame, width, height))
             {
                 status.Text = preview.Diagnostic;
+                Console.WriteLine(status.Text);
                 Finish(status, report, failed: true);
                 return;
             }
             ++_presented;
             status.Text = string.Create(CultureInfo.InvariantCulture,
                 $"presented {_presented} frames of {width}x{height}");
+            // Also on stdout: the composition visual covers the window once it is
+            // presenting, so the on-screen text stops being readable exactly when
+            // there is something to report.
+            if (_presented <= 3 || _presented % 60 == 0)
+                Console.WriteLine(status.Text);
             if (frameBudget > 0 && _presented >= frameBudget)
                 Finish(status, report);
         };
