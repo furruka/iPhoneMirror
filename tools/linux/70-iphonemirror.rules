@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# iPhoneMirror wired capture: grant the local desktop user access to Apple USB
+# devices.
+#
+# Why this is needed: usbmuxd ships /usr/lib/udev/rules.d/39-usbmuxd.rules,
+# which sets OWNER="usbmux" on every Apple device it supports. That leaves
+# /dev/bus/usb/<bus>/<dev> owned by the usbmux system user, so an ordinary
+# desktop session cannot open the device node and the hidden QuickTime
+# configuration cannot be enabled.
+#
+# How this grants access: TAG+="uaccess" makes systemd attach an ACL for the
+# user of the active local session (systemd's own 73-seat-late.rules turns the
+# tag into RUN{builtin}+="uaccess"). No group membership and no new login are
+# required, and the file owner stays usbmux so usbmuxd keeps working exactly as
+# before. A deliberate consequence is that this does not cover a headless or
+# SSH-only session, which has no active seat: for that case add a group of your
+# own choosing, for example
+#   MODE="0660", GROUP="wheel"
+# on the lines below and make sure your user is in it.
+#
+# This rule number is above usbmuxd's 39- so it runs afterwards. It does not set
+# OWNER, does not change bConfigurationValue and does not start or stop any
+# service.
+#
+# Install:
+#   sudo install -m 0644 tools/linux/70-iphonemirror.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger --subsystem-match=usb --attr-match=idVendor=05ac
+# Uninstall:
+#   sudo rm /etc/udev/rules.d/70-iphonemirror.rules
+#   sudo udevadm control --reload-rules
+
+ACTION=="remove", GOTO="iphonemirror_end"
+SUBSYSTEM!="usb", GOTO="iphonemirror_end"
+ATTR{idVendor}!="05ac", GOTO="iphonemirror_end"
+
+# Apple mobile capture product ids, kept in sync with
+# config/apple-mobile-capture-pids.txt and
+# is_apple_mobile_capture_product_id() in src/Core/src/Device/AppleUsbDiscovery.h.
+# Apple TV, Watch, HomePod and the USB-C headphone adapter are excluded on
+# purpose: they are not capture targets.
+ATTR{idProduct}=="1290|1291|1292|1293|1294|1297|1299|129a|129c|129d|129e|129f", \
+    TAG+="uaccess"
+ATTR{idProduct}=="12a0|12a1|12a2|12a3|12a4|12a5|12a6|12a8|12a9|12aa|12ab|12ac", \
+    TAG+="uaccess"
+
+LABEL="iphonemirror_end"

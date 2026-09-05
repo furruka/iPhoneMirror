@@ -66,6 +66,18 @@ std::unique_ptr<IVideoDecoder> make_platform_video_decoder(
     return std::make_unique<StubVideoDecoder>(preference);
 }
 
+namespace detail {
+
+// The Windows counterpart opens a D3D11 shared texture and reads it back. No
+// Linux decoder publishes a cross-device shared GPU frame, so there is never
+// anything to materialize; copy_nv12_frame_letterboxed only calls this when
+// DecodedFrame::gpu_frame is set.
+bool materialize_gpu_frame(DecodedFrame& frame) noexcept {
+    return !frame.nv12.empty();
+}
+
+} // namespace detail
+
 } // namespace iPhoneMirror::media
 
 namespace iPhoneMirror::audio {

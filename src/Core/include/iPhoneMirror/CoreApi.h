@@ -11,7 +11,13 @@
 #  endif
 #  define IM_CALL __cdecl
 #else
-#  define IM_API extern "C"
+// The shared library is built with hidden default visibility, so the C ABI has
+// to opt back in. Consumers need nothing beyond C linkage on ELF.
+#  ifdef IPHONEMIRROR_CORE_EXPORTS
+#    define IM_API extern "C" __attribute__((visibility("default")))
+#  else
+#    define IM_API extern "C"
+#  endif
 #  define IM_CALL
 #endif
 

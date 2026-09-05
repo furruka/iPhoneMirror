@@ -54,7 +54,8 @@ Linux 后端一律以新增文件实现。
 | P1-S3 | spike：Avalonia 嵌入原生 surface | `[x]` |
 | P1-S4 | spike：解码 → dmabuf → libplacebo 出画并测延迟 | `[x]` |
 | P2 | `CaptureSession.cpp` 抽缝共享（方案 X；`wchar_t` 保留，`ApiVersion` 保持 18） | `[x]` |
-| P3 | Linux USB 采集（无头验证优先） | `[ ]` |
+| P3-WP3 | `LinuxCoreApi.cpp` + `LinuxDeviceManager` + `LinuxEnvironmentProbe` + udev 规则 | `[x]` |
+| P3 | Linux USB 采集（无头验证优先，**需真机**） | `[ ]` |
 | P4 | FFmpeg 解码 / libplacebo 渲染 / PipeWire 音频 | `[ ]` |
 | P5 | Avalonia GUI（P5a 最小外壳进 M1，P5b 全量对齐随后） | `[ ]` |
 | P6 | UxPlay 引擎无线接收 | `[ ]` |
@@ -97,6 +98,39 @@ P2 共享 `CaptureSession.cpp`（方案 X，2402 行的握手状态机、看门�
 
 Linux 侧新增系统依赖：`libusb-1.0`、`libcrypto`（`pkg-config` 解析，CI 装
 `libusb-1.0-0-dev libssl-dev pkg-config`）。
+
+WP3 Linux C ABI 与环境探测：
+
+- `src/LinuxCoreApi.cpp` 实现 `CoreApi.h` 的全部 60 个导出。**真实实现**：
+  `im_initialize`/`im_shutdown`/`im_api_version`/`im_log_message`/
+  `im_last_error`/`im_get_environment`/`im_refresh_devices(_ex)`。其余导出返回
+  明确失败并在错误串里点名负责的 WP，**任何导出都不会在没做事的情况下返回 Ok**
+  ——否则调用方会拿着 Ok 一直等帧。
+- `Device/LinuxEnvironmentProbe.{h,cpp}` 回答 Linux 特有的两个问题：usbmuxd
+  状态与 Apple USB 设备节点权限。usbmuxd 区分**未安装**、**已安装但未运行**
+  （由 udev 在插入设备时拉起，无设备时这是正常状态，不是故障）、**套接字存在
+  但拒连**、**已连接**四态。设备节点权限用 libusb 打开尝试判定，
+  `LIBUSB_ERROR_ACCESS` 正是需要区分出来的那种失败。
+- `Device/LinuxDeviceManager.cpp` 填 `EnvironmentRecord`/`DeviceRecord`：
+  `apple_mobile_device_service_*` 映射为 usbmuxd，`capture_usbmux` 恒为 false
+  （Linux 只有一个 usbmuxd），`usbdk_backend` 报「已知且不可用」。设备枚举合并
+  AF_UNIX usbmux 与 libusb 两个来源——设备可能在 USB 上可见而 usbmuxd 未认领，
+  那正是隐藏采集配置留下的状态。
+- `tools/linux/70-iphonemirror.rules`：靠 `TAG+="uaccess"` 让 systemd 给活动
+  本地会话的用户加 ACL，**不改 OWNER、不动 `bConfigurationValue`、不启停服务**，
+  也不需要 `usermod` 或重新登录。规则号在 usbmuxd 的 39- 之后。无头/SSH 会话
+  没有活动 seat，`uaccess` 不覆盖，注释里给了改用组的写法。
+- 验收工具 `iPhoneMirror.Linux.EnvironmentReport`（只读、不需要设备）：
+
+```sh
+LD_LIBRARY_PATH=build/linux/src/Core \
+  ./build/linux/src/Core/iPhoneMirror.Linux.EnvironmentReport
+```
+
+本机实测（2026-09-05，未接设备）：安装 udev 规则前诊断以「有线采集尚不可用」
+结尾，`install` + `udevadm control --reload-rules` 之后该结论消失，
+`im_start_capture` 稳定返回 `-7` 并说明由 WP4/WP5 负责。`uaccess` 的 ACL 是否
+真的落到 `/dev/bus/usb` 节点上**未验证**，要等 WP4 的真机闸门。
 
 P1 的构建结论：`src/Core` 的 5 个可移植翻译单元（Protocol / Media / CoreMedia / H264）
 在 GCC 16.2 与 Clang 22.1 下都能构建出 `libiPhoneMirror.Core.so`，`ctest` 3/3 通过

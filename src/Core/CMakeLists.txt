@@ -13,6 +13,7 @@ set(IPHONEMIRROR_CORE_PORTABLE_SOURCES
     src/Logging.cpp
     src/Transport/Socket.cpp
     src/Transport/AppleUsbSerial.cpp
+    src/Transport/AppleUsbSelection.cpp
     src/Transport/UsbMuxClient.cpp
     src/Transport/QtUsbTransport.cpp
     src/Capture/CaptureSession.cpp
@@ -47,7 +48,10 @@ else()
     # until the FFmpeg decoder and PipeWire renderer land.
     set(IPHONEMIRROR_CORE_SOURCES
         ${IPHONEMIRROR_CORE_PORTABLE_SOURCES}
+        src/LinuxCoreApi.cpp
         src/Device/LinuxAppleUsbDiscovery.cpp
+        src/Device/LinuxDeviceManager.cpp
+        src/Device/LinuxEnvironmentProbe.cpp
         src/Media/LinuxMediaStubs.cpp)
 endif()
 
@@ -161,6 +165,7 @@ if(IPHONEMIRROR_BUILD_TESTS)
             src/Text/Utf.cpp
             src/Transport/Socket.cpp
             src/Transport/AppleUsbSerial.cpp
+            src/Transport/AppleUsbSelection.cpp
             src/Transport/UsbMuxClient.cpp
             src/Transport/QtUsbTransport.cpp
             src/Transport/LibUsb0Transport.cpp
@@ -229,6 +234,33 @@ if(IPHONEMIRROR_BUILD_TESTS)
     target_link_libraries(iPhoneMirror.Utf.Tests PRIVATE
         iPhoneMirror.CompileOptions)
     add_test(NAME UtfTests COMMAND iPhoneMirror.Utf.Tests)
+
+    if(NOT WIN32)
+        # The readiness verdict and its diagnostic decide what the user is told
+        # to fix, so they are tested as pure functions over a synthetic report.
+        add_executable(iPhoneMirror.LinuxEnvironmentProbe.Tests
+            tests/LinuxEnvironmentProbeTests.cpp
+            src/Device/LinuxEnvironmentProbe.cpp
+            src/Text/Utf.cpp
+            src/Transport/Socket.cpp)
+        target_include_directories(iPhoneMirror.LinuxEnvironmentProbe.Tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_link_libraries(iPhoneMirror.LinuxEnvironmentProbe.Tests PRIVATE
+            iPhoneMirror.CompileOptions
+            PkgConfig::IPHONEMIRROR_LIBUSB)
+        add_test(NAME LinuxEnvironmentProbeTests
+            COMMAND iPhoneMirror.LinuxEnvironmentProbe.Tests)
+
+        # WP3 acceptance tool: prints the environment report through the real C
+        # ABI. Needs no device and changes no state, so it is always built.
+        add_executable(iPhoneMirror.Linux.EnvironmentReport
+            tools/LinuxEnvironmentReport.cpp)
+        target_include_directories(iPhoneMirror.Linux.EnvironmentReport PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include)
+        target_link_libraries(iPhoneMirror.Linux.EnvironmentReport PRIVATE
+            iPhoneMirror.CompileOptions
+            iPhoneMirror.Core)
+    endif()
 
     add_executable(iPhoneMirror.UsbConfigurationRestorePolicy.Tests
         tests/UsbConfigurationRestorePolicyTests.cpp)
