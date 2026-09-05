@@ -53,7 +53,7 @@ Linux 后端一律以新增文件实现。
 | P1-S2 | spike：AF_UNIX usbmux `ListDevices`（**需真机**） | `[~]` |
 | P1-S3 | spike：Avalonia 嵌入原生 surface | `[x]` |
 | P1-S4 | spike：解码 → dmabuf → libplacebo 出画并测延迟 | `[x]` |
-| P2 | `CaptureSession.cpp` 抽缝共享（方案 X；`wchar_t` 保留，`ApiVersion` 保持 18）。前置条件：Windows CI 绿，**已满足** | `[ ]` |
+| P2 | `CaptureSession.cpp` 抽缝共享（方案 X；`wchar_t` 保留，`ApiVersion` 保持 18） | `[x]` |
 | P3 | Linux USB 采集（无头验证优先） | `[ ]` |
 | P4 | FFmpeg 解码 / libplacebo 渲染 / PipeWire 音频 | `[ ]` |
 | P5 | Avalonia GUI（P5a 最小外壳进 M1，P5b 全量对齐随后） | `[ ]` |
@@ -72,6 +72,31 @@ WP1 抽取（零行为变更，Windows CI 复验）：`MediaFoundationDecoder` �
 `Text/Utf`（Windows 走 WinAPI，Linux 手写 UTF-8↔UTF-32，含单测 `UtfTests`）。
 `Transport/Socket` 跨平台化并新增 `connect_unix`（AF_UNIX usbmuxd 用）；
 `QtUsbTransport` 的 UsbDk 探测包 `#ifdef`，Linux 走系统 libusb-1.0。
+
+P2 共享 `CaptureSession.cpp`（方案 X，2402 行的握手状态机、看门狗、防护内容
+检测、解码器切换与视频队列预算现在两平台共用一份）：
+
+- 媒体后端改走接缝 `Media/IVideoDecoder.h` 与 `Audio/IAudioRenderer.h`，由
+  `Media/ActiveVideoDecoder.h` 的工厂按平台构造。Windows 仍是 Media Foundation
+  与 WASAPI；Linux 目前是 `LinuxMediaStubs.cpp`，解码器构造即抛
+  "not implemented yet (WP5)"，音频渲染器沿用同一套格式校验后静默丢弃。
+  **桩不会假装成功**——WP5 落地 FFmpeg 解码器与 PipeWire 渲染器时替换。
+- libusb0/UsbDk 后端、`LibUsb0RestoreLease`、`restore_libusb0_configuration`
+  与 PnP 观察全部包在 `#ifdef _WIN32` 内。`UsbBackend` 枚举保留三个取值，
+  后端亲和性记账与诊断因此仍是一份代码，Linux 只会选到 `LibUsb1`。
+- usbmux 端点访问抽象成 `for_each_usbmux_endpoint`：Windows 探测 loopback
+  27015/37015，Linux 连 `/var/run/usbmuxd`。
+- `Logging` 跨平台化：`getrandom`/`getpid`/`getenv`/`localtime_r`，SHA-256 由
+  BCrypt 换成 libcrypto（**仅用于日志里匿名化设备序列号**，salt 每进程随机）。
+- `apple_usb_serial_equal` 与序列号归一化从 libusb0 后端抽到
+  `Transport/AppleUsbSerial.{h,cpp}`。
+- Apple USB 设备状态查询在 Linux 由 `Device/LinuxAppleUsbDiscovery.cpp` 回答：
+  过滤驱动安全性是**真实结论 Safe**（Linux 路径上根本没有过滤驱动），
+  `is_apple_usb_parent_present` 走 libusb 枚举。其余 PnP 接口状态查询没有
+  Linux 对应物，只被 Windows 分支调用。
+
+Linux 侧新增系统依赖：`libusb-1.0`、`libcrypto`（`pkg-config` 解析，CI 装
+`libusb-1.0-0-dev libssl-dev pkg-config`）。
 
 P1 的构建结论：`src/Core` 的 5 个可移植翻译单元（Protocol / Media / CoreMedia / H264）
 在 GCC 16.2 与 Clang 22.1 下都能构建出 `libiPhoneMirror.Core.so`，`ctest` 3/3 通过

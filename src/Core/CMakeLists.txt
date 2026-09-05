@@ -10,8 +10,12 @@ set(IPHONEMIRROR_CORE_PORTABLE_SOURCES
     src/Media/VideoFrameCopy.cpp
     src/Audio/PcmBufferPolicy.cpp
     src/Text/Utf.cpp
+    src/Logging.cpp
     src/Transport/Socket.cpp
+    src/Transport/AppleUsbSerial.cpp
+    src/Transport/UsbMuxClient.cpp
     src/Transport/QtUsbTransport.cpp
+    src/Capture/CaptureSession.cpp
 )
 
 # Windows-only subsystems: Media Foundation decoding, WASAPI playback, D3D11
@@ -21,12 +25,10 @@ set(IPHONEMIRROR_CORE_PORTABLE_SOURCES
 set(IPHONEMIRROR_CORE_WINDOWS_SOURCES
     resources/iPhoneMirror.Core.rc
     src/CoreApi.cpp
-    src/Logging.cpp
-    src/Transport/UsbMuxClient.cpp
+    src/Media/ActiveVideoDecoder.cpp
     src/Transport/LibUsb0Transport.cpp
     src/Device/AppleUsbDiscovery.cpp
     src/Device/DeviceManager.cpp
-    src/Capture/CaptureSession.cpp
     src/Capture/WirelessReceiverHub.cpp
     src/Capture/WirelessCaptureSession.cpp
     src/Media/MediaFoundationDecoder.cpp
@@ -40,9 +42,13 @@ if(WIN32)
         ${IPHONEMIRROR_CORE_WINDOWS_SOURCES})
 else()
     # The Linux backends are added as this port progresses; see
-    # docs/LINUX_PORT.md for the phase status. Until then the Linux
-    # configuration only builds the portable protocol layer and its tests.
-    set(IPHONEMIRROR_CORE_SOURCES ${IPHONEMIRROR_CORE_PORTABLE_SOURCES})
+    # docs/LINUX_PORT.md for the phase status. The shared capture state machine
+    # builds against the media seams, whose Linux implementations are stubs
+    # until the FFmpeg decoder and PipeWire renderer land.
+    set(IPHONEMIRROR_CORE_SOURCES
+        ${IPHONEMIRROR_CORE_PORTABLE_SOURCES}
+        src/Device/LinuxAppleUsbDiscovery.cpp
+        src/Media/LinuxMediaStubs.cpp)
 endif()
 
 add_library(iPhoneMirror.Core SHARED ${IPHONEMIRROR_CORE_SOURCES})
@@ -99,10 +105,15 @@ if(WIN32)
     )
 else()
     # QtUsbTransport in the portable source list talks to libusb-1.0 directly;
-    # the distribution library replaces the vendored Windows one.
+    # the distribution library replaces the vendored Windows one. libcrypto
+    # provides the SHA-256 that BCrypt provides on Windows, used only to
+    # anonymize device serials in the log.
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(IPHONEMIRROR_LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)
-    target_link_libraries(iPhoneMirror.Core PRIVATE PkgConfig::IPHONEMIRROR_LIBUSB)
+    pkg_check_modules(IPHONEMIRROR_CRYPTO REQUIRED IMPORTED_TARGET libcrypto)
+    target_link_libraries(iPhoneMirror.Core PRIVATE
+        PkgConfig::IPHONEMIRROR_LIBUSB
+        PkgConfig::IPHONEMIRROR_CRYPTO)
 endif()
 
 set_target_properties(iPhoneMirror.Core PROPERTIES
@@ -147,7 +158,8 @@ if(IPHONEMIRROR_BUILD_TESTS)
             src/Audio/PcmBufferPolicy.cpp
             src/Audio/WasapiRenderer.cpp
             src/Transport/Socket.cpp
-            src/Transport/UsbMuxClient.cpp
+            src/Transport/AppleUsbSerial.cpp
+    src/Transport/UsbMuxClient.cpp
             src/Transport/QtUsbTransport.cpp
             src/Transport/LibUsb0Transport.cpp
             src/Device/AppleUsbDiscovery.cpp

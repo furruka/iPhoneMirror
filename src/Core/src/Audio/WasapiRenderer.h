@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Audio/IAudioRenderer.h"
 #include "Media/CoreMedia.h"
 #include "Audio/PcmBufferPolicy.h"
 
@@ -20,18 +21,14 @@ enum class WasapiBufferingMode {
     NetworkJitter,
 };
 
-struct PlaybackStats {
-    bool active{};
-    std::uint64_t queued_frames{};
-    std::uint64_t rendered_frames{};
-    std::uint64_t dropped_frames{};
-    std::uint64_t underruns{};
-};
+// The struct itself now lives in Audio/IAudioRenderer.h; this alias keeps the
+// historical unqualified name working for existing call sites.
+using PlaybackStats = IAudioRenderer::PlaybackStats;
 
 // Event-driven shared-mode WASAPI sink for the PCM stream carried by Apple's
 // QuickTime screen-capture protocol. All COM and endpoint calls live on the
 // dedicated audio thread; the USB producer only performs a bounded ring copy.
-class WasapiRenderer {
+class WasapiRenderer : public IAudioRenderer {
 public:
     explicit WasapiRenderer(const coremedia::AudioStreamBasicDescription& format,
         bool playback_enabled = true, float volume = 1.0F,
@@ -40,11 +37,11 @@ public:
     WasapiRenderer(const WasapiRenderer&) = delete;
     WasapiRenderer& operator=(const WasapiRenderer&) = delete;
 
-    void enqueue(std::span<const std::uint8_t> pcm);
-    void set_enabled(bool enabled) noexcept;
-    void set_volume(float volume) noexcept;
-    void stop() noexcept;
-    [[nodiscard]] PlaybackStats stats() const;
+    void enqueue(std::span<const std::uint8_t> pcm) override;
+    void set_enabled(bool enabled) noexcept override;
+    void set_volume(float volume) noexcept override;
+    void stop() noexcept override;
+    [[nodiscard]] PlaybackStats stats() const override;
 
 private:
     coremedia::AudioStreamBasicDescription format_;

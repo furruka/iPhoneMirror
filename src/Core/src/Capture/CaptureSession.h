@@ -19,7 +19,7 @@
 #include <thread>
 
 namespace iPhoneMirror::audio {
-class WasapiRenderer;
+class IAudioRenderer;
 }
 
 namespace iPhoneMirror::transport {
@@ -231,6 +231,10 @@ public:
     void request_display_orientation(bool landscape) noexcept override;
 
 private:
+    // LibUsb0 and UsbDk are Windows-only backends. The enumerator keeps all
+    // three values on both platforms so the backend-affinity bookkeeping and
+    // its diagnostics stay one shared code path; the Linux build only ever
+    // selects LibUsb1.
     enum class UsbBackend { LibUsb1, UsbDk, LibUsb0 };
     std::string serial_;
     CapturePreferences preferences_;
@@ -262,7 +266,7 @@ private:
     detail::DecoderSwitchCoordinator decoder_switch_;
     std::atomic_uint64_t native_probe_size_{};
     mutable std::mutex audio_mutex_;
-    std::unique_ptr<audio::WasapiRenderer> audio_renderer_;
+    std::unique_ptr<audio::IAudioRenderer> audio_renderer_;
     std::deque<std::shared_ptr<const AudioPacket>> audio_output_queue_;
     std::uint64_t audio_output_sequence_{};
 

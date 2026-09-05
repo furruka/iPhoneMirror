@@ -1,4 +1,5 @@
 #include "Transport/LibUsb0Transport.h"
+#include "Transport/AppleUsbSerial.h"
 #include "Transport/AppleUsbIdentityCache.h"
 #include "Logging.h"
 
@@ -197,30 +198,6 @@ bool run_configuration_switch_helper(const AppleUsbIdentity& identity,
     throw std::runtime_error(std::format(
         "USB configuration helper failed: operation={} exit_code={}",
         activate ? "activate" : "restore", exit_code));
-}
-
-std::string normalize(std::string_view source) {
-    std::string value(source);
-    const auto embedded_null = value.find('\0');
-    if (embedded_null != std::string::npos) {
-        if (!std::all_of(value.begin() + static_cast<std::ptrdiff_t>(embedded_null),
-                value.end(), [](char ch) { return ch == '\0'; })) {
-            return {};
-        }
-        value.resize(embedded_null);
-    }
-    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())))
-        value.pop_back();
-    std::size_t leading{};
-    while (leading < value.size() &&
-        std::isspace(static_cast<unsigned char>(value[leading]))) ++leading;
-    if (leading != 0) value.erase(0, leading);
-    if (value.size() == 24 && value.find('-') == std::string::npos && value.find('&') == std::string::npos) {
-        value.insert(8, "-");
-    }
-    std::transform(value.begin(), value.end(), value.begin(),
-        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return value;
 }
 
 std::vector<UsbEndpointSet> endpoint_candidates_for(
@@ -584,7 +561,7 @@ AppleUsbSelection select_apple_usb_device(
             device.topology_id == identity.topology_id;
         bool candidate_serial_available{};
         try {
-            candidate_serial_available = !normalize(device.serial).empty();
+            candidate_serial_available = !normalize_apple_usb_serial(device.serial).empty();
         } catch (...) {}
         if (serial_match) {
             ++result.serial_matches;
@@ -708,20 +685,6 @@ bool libusb0_available() noexcept {
     if (!module) return false;
     FreeLibrary(module);
     return true;
-}
-
-bool apple_usb_serial_equal(std::string_view left, std::string_view right) noexcept {
-    try {
-        const auto normalized_left = normalize(left);
-        const auto normalized_right = normalize(right);
-        return !normalized_left.empty() && !normalized_right.empty() &&
-            normalized_left == normalized_right;
-    } catch (...) {
-        // This helper is also used by the C ABI readiness probe. Treat an
-        // allocation failure as a non-match instead of allowing an exception
-        // to cross a noexcept/native boundary.
-        return false;
-    }
 }
 
 std::vector<AppleUsbDevice> enumerate_libusb0(

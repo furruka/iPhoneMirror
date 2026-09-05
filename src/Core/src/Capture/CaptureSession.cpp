@@ -4,15 +4,23 @@
 
 #include "Transport/UsbMuxClient.h"
 
-#include "Media/MediaFoundationDecoder.h"
-#include "Audio/WasapiRenderer.h"
+#include "Audio/IAudioRenderer.h"
+#include "Audio/PcmBufferPolicy.h"
+#include "Media/ActiveVideoDecoder.h"
+#include "Media/IVideoDecoder.h"
+#include "Media/VideoFormats.h"
 #include "Logging.h"
 #include "Protocol/QuickTimePacket.h"
-#include "Transport/LibUsb0Transport.h"
+#include "Text/Utf.h"
+#include "Transport/AppleUsbSerial.h"
 #include "Transport/QtUsbTransport.h"
+
+#ifdef _WIN32
+#include "Transport/LibUsb0Transport.h"
 
 #include <Windows.h>
 #include <cfgmgr32.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -35,6 +43,7 @@ namespace iPhoneMirror::capture {
 namespace {
 
 std::binary_semaphore usb_transition_gate{1};
+#ifdef _WIN32
 // The legacy libusb0/AppleUsbFilter stack performs configuration changes as
 // asynchronous PnP transactions. A per-session transition gate cannot
 // protect the driver when two CaptureSession instances tear down close
@@ -42,6 +51,7 @@ std::binary_semaphore usb_transition_gate{1};
 // transfers remain concurrent; the lease is held from the active-handle 0x52
 // request through descriptor observation and any bounded fallback.
 std::counting_semaphore<1> libusb0_restore_gate{1};
+#endif
 std::mutex active_usb_backend_mutex;
 std::array<std::uint32_t, 3> active_usb_backend_counts{};
 
@@ -103,6 +113,7 @@ private:
     std::function<void()> cleanup_;
 };
 
+#ifdef _WIN32
 class LibUsb0RestoreLease final {
 public:
     LibUsb0RestoreLease() = default;
@@ -154,6 +165,7 @@ private:
     bool held_{};
     std::string_view device_fp_;
 };
+#endif
 
 struct NativeDisplaySize { std::uint32_t width; std::uint32_t height; };
 
@@ -217,10 +229,8 @@ DecoderRuntimeMode decoder_runtime_mode(media::DecoderAcceleration acceleration)
 
 std::wstring widen(std::string_view utf8) {
     if (utf8.empty()) return {};
-    const int length = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
-    if (length <= 0) return L"未知错误";
-    std::wstring result(static_cast<std::size_t>(length), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), result.data(), length);
+    auto result = text::utf8_to_wide(utf8);
+    if (result.empty()) return L"未知错误";
     return result;
 }
 
@@ -231,38 +241,61 @@ std::optional<transport::AppleUsbDevice> find_device(
     return context.find_apple_device(identity, require_quicktime);
 }
 
-std::uint16_t mux_product_id_for(std::string_view serial) noexcept {
-    if (serial.empty()) return 0;
+// Apple's Windows service exposes usbmux on loopback TCP; Linux usbmuxd
+// exposes the same wire protocol on a unix-domain socket. Both are visited
+// through the same client and the same message handling.
+template <typename Visit>
+void for_each_usbmux_endpoint(Visit&& visit) noexcept {
+#ifdef _WIN32
     for (const auto port : {std::uint16_t{27015}, std::uint16_t{37015}}) {
         if (!transport::Socket::probe_loopback(port)) continue;
         try {
             transport::UsbMuxClient mux(port);
-            for (const auto& device : mux.list_devices()) {
-                if (!transport::apple_usb_serial_equal(device.serial, serial) ||
-                    device.product_id == 0 || device.product_id > 0xffffU)
-                    continue;
-                return static_cast<std::uint16_t>(device.product_id);
-            }
+            if (visit(mux)) return;
         } catch (...) {
         }
     }
-    return 0;
+#else
+    try {
+        // Braced initialisation: the parenthesised form is a vexing parse,
+        // which Clang reads as a function declaration.
+        transport::UsbMuxClient mux{
+            std::string(transport::UsbMuxUnixSocketPath)};
+        if (visit(mux)) return;
+    } catch (...) {
+    }
+#endif
 }
 
-bool usbmux_contains_serial(std::string_view serial) noexcept {
-    if (serial.empty()) return false;
-    for (const auto port : {std::uint16_t{27015}, std::uint16_t{37015}}) {
-        if (!transport::Socket::probe_loopback(port)) continue;
-        try {
-            transport::UsbMuxClient mux(port);
-            for (const auto& device : mux.list_devices()) {
-                if (transport::apple_usb_serial_equal(device.serial, serial))
-                    return true;
-            }
-        } catch (...) {
+std::uint16_t mux_product_id_for(std::string_view serial) noexcept {
+    if (serial.empty()) return 0;
+    std::uint16_t product_id{};
+    for_each_usbmux_endpoint([&](transport::UsbMuxClient& mux) {
+        for (const auto& device : mux.list_devices()) {
+            if (!transport::apple_usb_serial_equal(device.serial, serial) ||
+                device.product_id == 0 || device.product_id > 0xffffU)
+                continue;
+            product_id = static_cast<std::uint16_t>(device.product_id);
+            return true;
         }
-    }
-    return false;
+        return false;
+    });
+    return product_id;
+}
+
+[[maybe_unused]] bool usbmux_contains_serial(std::string_view serial) noexcept {
+    if (serial.empty()) return false;
+    bool found{};
+    for_each_usbmux_endpoint([&](transport::UsbMuxClient& mux) {
+        for (const auto& device : mux.list_devices()) {
+            if (transport::apple_usb_serial_equal(device.serial, serial)) {
+                found = true;
+                return true;
+            }
+        }
+        return false;
+    });
+    return found;
 }
 
 transport::AppleUsbIdentity requested_usb_identity(std::string_view serial) {
@@ -361,6 +394,7 @@ UsbConfigurationRestoreResult restore_usb_configuration(
     };
 }
 
+#ifdef _WIN32
 UsbConfigurationRestoreResult restore_libusb0_configuration(
     const transport::AppleUsbIdentity& identity,
     bool primary_request_sent = false) noexcept {
@@ -439,6 +473,7 @@ UsbConfigurationRestoreResult restore_libusb0_configuration(
     result.disable_requested = restore_request_sent;
     return result;
 }
+#endif
 
 UsbConfigurationRestoreResult restore_qt_configuration(bool use_usbdk,
     const transport::AppleUsbIdentity& identity,
@@ -470,7 +505,7 @@ std::uint8_t luma_as_8bit(const media::DecodedFrame& frame,
     return row[x];
 }
 
-std::optional<bool> padded_content_orientation(const media::DecodedFrame& frame) {
+[[maybe_unused]] std::optional<bool> padded_content_orientation(const media::DecodedFrame& frame) {
     if (frame.width < 64 || frame.height < 64 || frame.nv12.empty()) return std::nullopt;
     const auto stride = static_cast<std::size_t>(std::abs(frame.stride));
     const auto row_bytes = static_cast<std::size_t>(frame.width) *
@@ -508,7 +543,7 @@ std::optional<bool> padded_content_orientation(const media::DecodedFrame& frame)
     return std::nullopt;
 }
 
-bool frame_is_nearly_black(const media::DecodedFrame& frame) noexcept {
+[[maybe_unused]] bool frame_is_nearly_black(const media::DecodedFrame& frame) noexcept {
     if (frame.width < 32 || frame.height < 32 || frame.nv12.empty()) return false;
     const auto stride = static_cast<std::size_t>(std::abs(frame.stride));
     const auto row_bytes = static_cast<std::size_t>(frame.width) *
@@ -795,10 +830,12 @@ void CaptureSession::start(bool use_usbdk) {
             // open the exact device. The libusb0 fallback preserves wired
             // capture on installations that only expose the legacy filter.
             append_backend(use_usbdk ? UsbBackend::UsbDk : UsbBackend::LibUsb1);
+#ifdef _WIN32
             append_backend(use_usbdk ? UsbBackend::LibUsb1 : UsbBackend::UsbDk);
             if (active_backend)
                 append_backend(static_cast<UsbBackend>(*active_backend));
             append_backend(UsbBackend::LibUsb0);
+#endif
             logging::write(std::format(
                 "usb_backend_order safety={} preferred=non_libusb0 active_backend={} order=libusb1_or_usbdk_then_fallback",
                 filter_safety.safety == device::AppleUsbFilterSafety::Unsafe
@@ -810,13 +847,18 @@ void CaptureSession::start(bool use_usbdk) {
             // the same namespace and avoids a cross-backend descriptor reopen.
             if (active_backend)
                 append_backend(static_cast<UsbBackend>(*active_backend));
+#ifdef _WIN32
             append_backend(UsbBackend::LibUsb0);
+#endif
             append_backend(use_usbdk ? UsbBackend::UsbDk : UsbBackend::LibUsb1);
+#ifdef _WIN32
             append_backend(use_usbdk ? UsbBackend::LibUsb1 : UsbBackend::UsbDk);
+#endif
         }
 
         for (const auto backend : backend_order) {
             record_backend(backend, "begin");
+#ifdef _WIN32
             if (backend == UsbBackend::LibUsb0) {
                 if (!transport::libusb0_available()) {
                     record_backend(backend, "unavailable");
@@ -858,6 +900,7 @@ void CaptureSession::start(bool use_usbdk) {
                 }
                 continue;
             }
+#endif
 
             const bool candidate_uses_usbdk = backend == UsbBackend::UsbDk;
             try {
@@ -998,7 +1041,7 @@ void CaptureSession::request_display_orientation(bool landscape) noexcept {
 }
 
 void CaptureSession::stop_audio_renderer() noexcept {
-    std::unique_ptr<audio::WasapiRenderer> renderer;
+    std::unique_ptr<audio::IAudioRenderer> renderer;
     {
         std::scoped_lock lock(audio_mutex_);
         renderer = std::move(audio_renderer_);
@@ -1099,10 +1142,12 @@ void CaptureSession::run(std::stop_token stop_token) noexcept {
     UsbConfigurationRestoreResult configuration_restore_result;
     bool configuration_restore_attempted{};
     bool active_normal_request_sent{};
+    bool libusb0_restore_lease_acquired{};
+#ifdef _WIN32
     bool libusb0_restore_authorized{};
     std::optional<transport::AppleUsbIdentity> libusb0_restore_identity;
     LibUsb0RestoreLease libusb0_restore_lease;
-    bool libusb0_restore_lease_acquired{};
+#endif
     DeferredCleanup configuration_restore;
     DeferredCleanup active_backend_release;
     auto preflight_device = std::move(preflight_device_);
@@ -1244,13 +1289,16 @@ void CaptureSession::run(std::stop_token stop_token) noexcept {
         // first; the deferred restore then opens one short-lived, unclaimed
         // control handle. libusb-1/UsbDk retain their active-handle path.
         try {
+#ifdef _WIN32
             if (usb_backend_ == UsbBackend::LibUsb0) {
                 libusb0_restore_lease_acquired =
                     libusb0_restore_lease.acquire(device_fp);
                 logging::write(std::format(
                     "usb_configuration_restore action=close_stream_before_control device_fp={} lease_acquired={}",
                     device_fp, libusb0_restore_lease_acquired));
-            } else {
+            } else
+#endif
+            {
                 libusb0_restore_lease_acquired = true;
                 const bool acknowledged = usb->request_normal_configuration();
                 active_normal_request_sent = true;
@@ -1299,6 +1347,7 @@ void CaptureSession::run(std::stop_token stop_token) noexcept {
     try {
         bool quicktime_open_recovered{};
         bool newly_activated_libusb0{};
+#ifdef _WIN32
         if (usb_backend_ == UsbBackend::LibUsb0) {
             bool quicktime_activation_requested{};
             bool adopted_existing_quicktime{};
@@ -1422,7 +1471,9 @@ void CaptureSession::run(std::stop_token stop_token) noexcept {
                     throw;
                 }
             }
-        } else {
+        } else
+#endif
+        {
             const bool use_usbdk = usb_backend_ == UsbBackend::UsbDk;
             qt_context = std::make_unique<transport::QtUsbContext>(use_usbdk);
             std::optional<transport::AppleUsbDevice> device;
@@ -1567,7 +1618,7 @@ void CaptureSession::run(std::stop_token stop_token) noexcept {
         // through the next IDR, then rebuild the decoder from that keyframe.
         std::jthread video_worker([&](std::stop_token worker_token) noexcept {
             try {
-            std::unique_ptr<media::MediaFoundationVideoDecoder> video_decoder;
+            std::unique_ptr<media::IVideoDecoder> video_decoder;
             std::optional<coremedia::FormatDescription> current_format;
             std::optional<coremedia::FormatDescription> configured_format;
             const auto initial_decoder_status = decoder_switch_.status();
@@ -1642,7 +1693,7 @@ void CaptureSession::run(std::stop_token stop_token) noexcept {
                             configured_format->width, configured_format->height,
                             format.width, format.height));
                     }
-                    video_decoder = std::make_unique<media::MediaFoundationVideoDecoder>(
+                    video_decoder = media::make_platform_video_decoder(
                         active_decoder_preference);
                     video_decoder->configure(format, 60, 1);
                     active_decoder_runtime_mode = decoder_runtime_mode(
@@ -1731,7 +1782,7 @@ void CaptureSession::run(std::stop_token stop_token) noexcept {
                             next_decoder_switch_retry) {
                             try {
                                 auto replacement =
-                                    std::make_unique<media::MediaFoundationVideoDecoder>(
+                                    media::make_platform_video_decoder(
                                         requested_preference);
                                 replacement->configure(format, 60, 1);
                                 const bool applied = detail::trial_and_commit_decoder(
@@ -1740,7 +1791,7 @@ void CaptureSession::run(std::stop_token stop_token) noexcept {
                                         return candidate->decode(encoded_sample,
                                             timestamp_100ns, duration_100ns);
                                     },
-                                    [&](std::unique_ptr<media::MediaFoundationVideoDecoder>&&
+                                    [&](std::unique_ptr<media::IVideoDecoder>&&
                                             accepted_decoder,
                                         std::vector<media::DecodedFrame>&& accepted_frames) noexcept {
                                         video_decoder.swap(accepted_decoder);
@@ -2202,7 +2253,7 @@ void CaptureSession::run(std::stop_token stop_token) noexcept {
                         }
                         if (!audio_initialization_disabled && !audio_renderer_) {
                             try {
-                                audio_renderer_ = std::make_unique<audio::WasapiRenderer>(
+                                audio_renderer_ = audio::make_platform_audio_renderer(
                                     *audio_format->audio,
                                     play_audio_.load(std::memory_order_relaxed),
                                     audio_volume_.load(std::memory_order_relaxed));
@@ -2340,7 +2391,9 @@ void CaptureSession::run(std::stop_token stop_token) noexcept {
         configuration_restore.run_now();
         const bool restored = finalize_configuration_restore();
         active_backend_release.run_now();
+#ifdef _WIN32
         libusb0_restore_lease.release();
+#endif
         transition_release.run_now();
         release_usb_transition_gate();
         logging::write("capture_run stop path");
@@ -2357,7 +2410,9 @@ void CaptureSession::run(std::stop_token stop_token) noexcept {
             !video_worker_failure.failed() && !peer_session_ended;
         const bool restored = finalize_configuration_restore(stopped_by_request);
         active_backend_release.run_now();
+#ifdef _WIN32
         libusb0_restore_lease.release();
+#endif
         transition_release.run_now();
         release_usb_transition_gate();
         logging::write(std::format("capture_run exception stop_requested={} error={}",

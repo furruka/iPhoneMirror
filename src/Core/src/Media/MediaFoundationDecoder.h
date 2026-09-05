@@ -5,6 +5,7 @@
 // The platform-neutral decoded-video model lives in VideoFormats.h; this
 // header keeps only the Media Foundation decoder itself. Consumers that used
 // the names through this header keep compiling unchanged.
+#include "Media/IVideoDecoder.h"
 #include "Media/VideoFormats.h"
 
 #include <memory>
@@ -13,7 +14,7 @@
 
 namespace iPhoneMirror::media {
 
-class MediaFoundationVideoDecoder {
+class MediaFoundationVideoDecoder : public IVideoDecoder {
 public:
     explicit MediaFoundationVideoDecoder(
         DecoderPreference preference = DecoderPreference::Auto);
@@ -22,18 +23,18 @@ public:
     MediaFoundationVideoDecoder& operator=(const MediaFoundationVideoDecoder&) = delete;
 
     void configure(const coremedia::FormatDescription& format,
-        std::uint32_t fps_numerator = 60, std::uint32_t fps_denominator = 1);
+        std::uint32_t fps_numerator = 60, std::uint32_t fps_denominator = 1) override;
     [[nodiscard]] std::vector<DecodedFrame> decode(
         std::span<const std::uint8_t> length_prefixed_sample,
-        std::int64_t timestamp_100ns, std::int64_t duration_100ns);
-    [[nodiscard]] std::vector<DecodedFrame> drain();
-    void flush();
+        std::int64_t timestamp_100ns, std::int64_t duration_100ns) override;
+    [[nodiscard]] std::vector<DecodedFrame> drain() override;
+    void flush() override;
 
-    [[nodiscard]] DecoderPreference preference() const noexcept;
-    [[nodiscard]] std::string_view selected_decoder_name() const noexcept;
-    [[nodiscard]] DecoderAcceleration decoder_acceleration() const noexcept;
-    [[nodiscard]] bool selected_decoder_is_hardware() const noexcept;
-    [[nodiscard]] PixelFormat output_pixel_format() const noexcept;
+    [[nodiscard]] DecoderPreference preference() const noexcept override;
+    [[nodiscard]] std::string_view selected_decoder_name() const noexcept override;
+    [[nodiscard]] DecoderAcceleration decoder_acceleration() const noexcept override;
+    [[nodiscard]] bool selected_decoder_is_hardware() const noexcept override;
+    [[nodiscard]] PixelFormat output_pixel_format() const noexcept override;
 
 private:
     struct Impl;

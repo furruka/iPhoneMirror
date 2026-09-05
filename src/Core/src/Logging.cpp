@@ -1,18 +1,26 @@
 #include "Logging.h"
 
+#ifdef _WIN32
 #include <Windows.h>
 #include <bcrypt.h>
+#else
+#include <openssl/evp.h>
+#include <sys/random.h>
+#include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <format>
 #include <iomanip>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -44,8 +52,33 @@ std::array<unsigned char, 32> fingerprint_salt{};
 bool fingerprint_salt_ready{};
 
 void initialize_fingerprint_salt() noexcept {
+#ifdef _WIN32
     fingerprint_salt_ready = BCryptGenRandom(nullptr, fingerprint_salt.data(),
         static_cast<ULONG>(fingerprint_salt.size()), BCRYPT_USE_SYSTEM_PREFERRED_RNG) >= 0;
+#else
+    // getrandom blocks only until the kernel pool is initialised, which happens
+    // long before any process gets far enough to log a device fingerprint.
+    std::size_t filled{};
+    while (filled < fingerprint_salt.size()) {
+        const auto received = ::getrandom(fingerprint_salt.data() + filled,
+            fingerprint_salt.size() - filled, 0);
+        if (received <= 0) {
+            fingerprint_salt_ready = false;
+            return;
+        }
+        filled += static_cast<std::size_t>(received);
+    }
+    fingerprint_salt_ready = true;
+#endif
+}
+
+// The session id and the log header only need the OS process id.
+std::uint32_t current_process_id() noexcept {
+#ifdef _WIN32
+    return static_cast<std::uint32_t>(GetCurrentProcessId());
+#else
+    return static_cast<std::uint32_t>(::getpid());
+#endif
 }
 
 const char* level_text(Level level) noexcept {
@@ -120,7 +153,7 @@ std::string make_session_id() {
     const auto ticks = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
-    return std::format("{:08X}-{:016X}", GetCurrentProcessId(), ticks);
+    return std::format("{:08X}-{:016X}", current_process_id(), ticks);
 }
 
 std::string now_text();
@@ -195,14 +228,18 @@ void ensure_flush_thread_locked() {
 
 std::filesystem::path default_path() {
     // TEMP is writable for both a normal desktop launch and a packaged EXE;
-    // unlike the application directory it does not require elevation.
-    return std::filesystem::temp_directory_path() / L"iPhoneMirror-capture.log";
+    // unlike the application directory it does not require elevation. On Linux
+    // temp_directory_path() resolves TMPDIR or /tmp.
+    return std::filesystem::temp_directory_path() / "iPhoneMirror-capture.log";
 }
 
-std::filesystem::path configured_path() {
+// Returns the configured log path override, or an empty optional when the
+// environment variable is unset.
+std::optional<std::filesystem::path> log_path_override() {
+#ifdef _WIN32
     constexpr auto variable = L"IPHONE_MIRROR_LOG_FILE";
     const auto required = GetEnvironmentVariableW(variable, nullptr, 0);
-    if (required == 0) return default_path();
+    if (required == 0) return std::nullopt;
 
     // Environment variables can approach 32 KiB. Keep that storage off the
     // caller's stack and allocate only as much as this value needs.
@@ -213,6 +250,16 @@ std::filesystem::path configured_path() {
         buffer.resize(length);
         return std::filesystem::path(buffer);
     }
+    return std::nullopt;
+#else
+    const char* const value = std::getenv("IPHONE_MIRROR_LOG_FILE");
+    if (value == nullptr || *value == '\0') return std::nullopt;
+    return std::filesystem::path(value);
+#endif
+}
+
+std::filesystem::path configured_path() {
+    if (auto override_path = log_path_override()) return *std::move(override_path);
     return default_path();
 }
 
@@ -222,7 +269,7 @@ void rotate_if_needed(const std::filesystem::path& path) {
     if (!std::filesystem::exists(path, error) || error ||
         std::filesystem::file_size(path, error) <= MaxLogBytes || error) return;
     auto previous = path;
-    previous += L".1";
+    previous += ".1";
     std::filesystem::remove(previous, error);
     error.clear();
     std::filesystem::rename(path, previous, error);
@@ -232,7 +279,11 @@ std::string now_text() {
     const auto now = std::chrono::system_clock::now();
     const auto time = std::chrono::system_clock::to_time_t(now);
     std::tm local{};
+#ifdef _WIN32
     localtime_s(&local, &time);
+#else
+    localtime_r(&time, &local);
+#endif
     const auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(
         now.time_since_epoch()).count() % 1000;
     std::ostringstream stream;
@@ -263,8 +314,7 @@ bool ensure_session_open_locked(bool implicit) {
     }
     log_file.clear();
 
-    const auto custom_log_path =
-        GetEnvironmentVariableW(L"IPHONE_MIRROR_LOG_FILE", nullptr, 0) != 0;
+    const auto custom_log_path = log_path_override().has_value();
     log_path = configured_path();
     if (!log_path.parent_path().empty())
         std::filesystem::create_directories(log_path.parent_path());
@@ -280,8 +330,8 @@ bool ensure_session_open_locked(bool implicit) {
     if (!session_header_written) {
         log_file << "\n=== iPhoneMirror capture session ===\n";
         log_file << now_text() << " [startup] session=" << session_id
-            << " pid=" << GetCurrentProcessId() << " arch="
-#if defined(_WIN64)
+            << " pid=" << current_process_id() << " arch="
+#if defined(_WIN64) || defined(__x86_64__) || defined(__aarch64__)
             << "x64"
 #else
             << "x86"
@@ -313,32 +363,56 @@ bool ensure_session_open_locked(bool implicit) {
     return true;
 }
 
+// Hashes the process-local random salt followed by `value`. The salt makes the
+// digest useless outside this process, which is the point: logs must be able to
+// correlate events for one device without recording its serial.
+bool salted_sha256(std::string_view value,
+    std::array<unsigned char, 32>& digest) noexcept {
+#ifdef _WIN32
+    BCRYPT_ALG_HANDLE algorithm{};
+    BCRYPT_HASH_HANDLE hash{};
+    bool success = BCryptOpenAlgorithmProvider(
+        &algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) >= 0;
+    success = success && BCryptCreateHash(
+        algorithm, &hash, nullptr, 0, nullptr, 0, 0) >= 0;
+    success = success && BCryptHashData(hash, fingerprint_salt.data(),
+        static_cast<ULONG>(fingerprint_salt.size()), 0) >= 0;
+    success = success && BCryptHashData(hash,
+        reinterpret_cast<PUCHAR>(const_cast<char*>(value.data())),
+        static_cast<ULONG>(value.size()), 0) >= 0;
+    success = success && BCryptFinishHash(hash, digest.data(),
+        static_cast<ULONG>(digest.size()), 0) >= 0;
+    if (hash) BCryptDestroyHash(hash);
+    if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
+    return success;
+#else
+    EVP_MD_CTX* context = EVP_MD_CTX_new();
+    if (context == nullptr) return false;
+    unsigned int digest_length{};
+    const bool success =
+        EVP_DigestInit_ex(context, EVP_sha256(), nullptr) == 1 &&
+        EVP_DigestUpdate(context, fingerprint_salt.data(),
+            fingerprint_salt.size()) == 1 &&
+        EVP_DigestUpdate(context, value.data(), value.size()) == 1 &&
+        EVP_DigestFinal_ex(context, digest.data(), &digest_length) == 1 &&
+        digest_length == digest.size();
+    EVP_MD_CTX_free(context);
+    return success;
+#endif
+}
+
 } // namespace
 
 std::string fingerprint(std::string_view value) noexcept {
     try {
         if (value.empty()) return "anon-empty";
-        if (value.size() > std::numeric_limits<ULONG>::max()) return "anon-too-large";
+        if (value.size() > std::numeric_limits<std::uint32_t>::max())
+            return "anon-too-large";
         std::call_once(fingerprint_salt_once, initialize_fingerprint_salt);
         if (!fingerprint_salt_ready) return "anon-unavailable";
 
-        BCRYPT_ALG_HANDLE algorithm{};
-        BCRYPT_HASH_HANDLE hash{};
         std::array<unsigned char, 32> digest{};
-        bool success = BCryptOpenAlgorithmProvider(
-            &algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) >= 0;
-        success = success && BCryptCreateHash(
-            algorithm, &hash, nullptr, 0, nullptr, 0, 0) >= 0;
-        success = success && BCryptHashData(hash, fingerprint_salt.data(),
-            static_cast<ULONG>(fingerprint_salt.size()), 0) >= 0;
-        success = success && BCryptHashData(hash,
-            reinterpret_cast<PUCHAR>(const_cast<char*>(value.data())),
-            static_cast<ULONG>(value.size()), 0) >= 0;
-        success = success && BCryptFinishHash(hash, digest.data(),
-            static_cast<ULONG>(digest.size()), 0) >= 0;
-        if (hash) BCryptDestroyHash(hash);
-        if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
-        if (!success) return "anon-unavailable";
+        if (!salted_sha256(value, digest)) return "anon-unavailable";
 
         constexpr char hex[] = "0123456789abcdef";
         std::string result = "anon-";

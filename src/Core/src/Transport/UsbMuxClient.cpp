@@ -2,7 +2,9 @@
 
 #include "Logging.h"
 
+#ifdef _WIN32
 #include <WinSock2.h>
+#endif
 
 #include <array>
 #include <chrono>
@@ -50,8 +52,16 @@ plist::Value UsbMuxClient::base_message(std::string message_type) const {
     });
 }
 
+Socket UsbMuxClient::connect() {
+#ifndef _WIN32
+    if (!unix_socket_path_.empty())
+        return Socket::connect_unix(unix_socket_path_);
+#endif
+    return Socket::connect_loopback(port_);
+}
+
 std::pair<Socket, plist::Value> UsbMuxClient::request_with_socket(const plist::Value& body) {
-    Socket socket = Socket::connect_loopback(port_);
+    Socket socket = connect();
     const std::string xml = plist::to_xml(body);
     std::vector<std::uint8_t> packet;
     packet.reserve(16 + xml.size());

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Capture/ICaptureSession.h"
-#include "Media/MediaFoundationDecoder.h"
+#include "Media/VideoFormats.h"
 
 #include <atomic>
 #include <cstdint>

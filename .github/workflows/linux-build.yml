@@ -44,12 +44,13 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v7
 
-      # The portable Core source list now includes the USB transport, which
-      # links the distribution's libusb-1.0 (REQUIRED in src/Core/CMakeLists.txt).
+      # The portable Core source list now includes the USB transport and the
+      # shared capture session, which link the distribution's libusb-1.0 and
+      # libcrypto (both REQUIRED in src/Core/CMakeLists.txt).
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes ninja-build libusb-1.0-0-dev pkg-config
+          sudo apt-get install --no-install-recommends --yes ninja-build libusb-1.0-0-dev libssl-dev pkg-config
 
       - name: Configure
         env:
