@@ -72,7 +72,20 @@ internal sealed class ShellApp : Application
             var player = new DevicePlayer(_serial);
             preview.Ready += (_, _) => player.Start(preview, status, _report);
             desktop.MainWindow.Closed += (_, _) => player.Stop();
-            AttachReverseControl(desktop.MainWindow, preview);
+            // Opt-in until the notification path stops destabilising capture.
+            // Mirroring alone is solid; wiring input in currently freezes the
+            // picture after a few hundred frames, and shipping that by default
+            // would trade a working feature for a broken one.
+            if (Environment.GetEnvironmentVariable("IPHONEMIRROR_REVERSE_CONTROL")
+                == "1")
+            {
+                AttachReverseControl(desktop.MainWindow, preview);
+            }
+            else
+            {
+                Console.WriteLine("reverse control : off "
+                    + "(set IPHONEMIRROR_REVERSE_CONTROL=1 to enable)");
+            }
         }
         base.OnFrameworkInitializationCompleted();
     }
