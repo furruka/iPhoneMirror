@@ -423,9 +423,7 @@ if (!ping_recovery_attempted &&
 
 已按上游的三重守卫改回，并把控制 kick 变成 `--control-kick` 显式开关。
 
-#### 尚未验证，而且设备现在卡住了
-
-上面那个修复**还没能验证**：iPad 目前处在采集配置摘不掉的状态。
+#### 设备可以卡进「采集配置摘不掉」的状态，只有重启能救
 
 - `0x52 wIndex=0` 在 180 秒里**发了 36 次、36 次全部 acknowledged**，`bNumConfigurations`
   始终是 5。
@@ -434,12 +432,54 @@ if (!ping_recovery_attempted &&
 - 在这个状态下 `--no-cycle`（直接 claim 已存在的配置）也不行：5 次 set + 5 次 claim
   全失败，`active_config` 一直停在 4，`overwrites=0`。
 
-即：**这台设备现在既不肯摘掉采集配置，也不肯把它设为活动配置。** 已知拔插不能复位，
-disable 请求被 acknowledged 但无效，所以要继续验证需要真正重启设备。
+即设备既不肯摘掉采集配置，也不肯把它设为活动配置。已知拔插不能复位、disable 被
+acknowledged 但无效，**重启设备是唯一出路**（重启后实测回到 `numcfg=4 active=4`）。
 
 顺带一条工具改进（来自参考实现，它的 disable 是 20 次循环）：reset 等待期内现在每
 5 秒重发一次 disable 并报告发了几次、几次被 ack，而不是只发一次。上面那个「36 次」
 就是这条改进测出来的。
+
+#### 重启后复验：守卫修复是对的，但不是原因
+
+重启后带守卫修复重跑：
+
+```
+recovery              : ready=yes set_attempts=2 overwrites=0 claim_attempts=2
+clear_halt            : both endpoints
+handshake state       : 1
+ping attempts         : 0          ← 不再发 kick、不再刷未请求的 PING
+outbound writes       : ok=1 failed=0
+bulk reads            : with_data=1 bytes=16 packets=1
+```
+
+`ping attempts : 0` 说明守卫生效了：状态一离开 `WaitingForPing`，恢复序列就不再触发。
+也没有任何写超时——因为我们不再乱写。
+
+**但握手仍然停在 `WaitingForAudioClock`。** 设备发一个 PING、接受我们的回复、然后
+40 秒内不再说话，`SYNC CWPA` 始终不来。所以**「控制 kick 破坏了会话」这条假设也被
+推翻了**——它确实是个该修的错误，但不是当前阻塞的原因。
+
+#### 已核对：包 magic 的字节序是对的，不要去「修」它
+
+`fourcc('p','i','n','g')` 按 Apple 的显示顺序等于 `0x70696E67`，`append_u32_le` 再把它
+按小端写出去，所以线上字节是 `67 6E 69 70`——**看起来像 "gnip"**。头文件里那段注释
+说的就是这件事。
+
+判据是解析器：`read_u32_le` + 同一个 `fourcc` 常量，而它**确实认出了设备发来的 PING**
+（状态从 0 进到 1 就是证据）。收发两侧用同一约定并且能对上设备，所以约定正确。把它
+「改成 ASCII 正序」会破坏一个已经在 Windows 上工作的协议。
+
+#### 记下一处与参考实现的差异（要等 CWPA 之后才用得上）
+
+参考实现在收到 `SYNC CWPA` 之后**连发两次 `ASYN HPD1`**（`WriteDataToUsb(deviceInfo)`
+调了两次，日志也打两遍），我们只发一次。目前还走不到那一步，先记着。
+
+#### 下一个待测变量：屏幕是否解锁
+
+现在唯一没控住的便宜变量是**设备解锁状态**。重启后 iPad 必须输密码才解锁，而这两轮
+停在状态 1 的运行都是在未确认解锁的情况下跑的。Valeria 的 PING 属于 USB 层、不需要
+用户同意；真正开始采集则需要设备解锁。工具自己打的那句
+"keep the device unlocked and retry" 指的就是这个。
 
 #### 关于「怎么复位」的事实更正
 
