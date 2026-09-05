@@ -56,7 +56,7 @@ Linux 后端一律以新增文件实现。
 | P2 | `CaptureSession.cpp` 抽缝共享（方案 X；`wchar_t` 保留，`ApiVersion` 保持 18） | `[x]` |
 | P3-WP3 | `LinuxCoreApi.cpp` + `LinuxDeviceManager` + `LinuxEnvironmentProbe` + udev 规则 | `[x]` |
 | P3-WP4 | 重枚举恢复策略 + libudev 监视器 + 无头采集工具（USB 半边真机通过） | `[x]` |
-| P3 | Linux USB 采集出画（**受阻**：握手在第一次交换后停，两台设备一致） | `[!]` |
+| P3 | Linux USB 采集出画（**已通过**：真机 849 帧视频 + 1164 个音频包落盘） | `[x]` |
 | P4 | FFmpeg 解码 / libplacebo 渲染 / PipeWire 音频 | `[~]` |
 | P4-WP5A | `LinuxFFmpegVideoDecoder`：libavcodec 解码 + libswscale 转 NV12/P010 | `[x]` |
 | P4-WP5B | `LinuxPipeWireAudioRenderer`：PipeWire 播放，队列策略与 WASAPI 共享 | `[x]` |
@@ -641,9 +641,67 @@ Windows 侧的做法是**检查驱动状态并告知用户**，而不是偷偷�
 
 **这个决定可以等实验之后再做**——如果第 2 条是假的，整个讨论就不成立。
 
-#### 待验证
+#### 已验证：换成 Valeria-aware 的 usbmuxd 之后，整条链通了
 
-装上 `usbmuxd-git` 之后重启设备再跑一轮。判据是 usbmuxd 日志里出现
+usbmuxd git master（`1.1.1-git-3ded00c`，本地构建于 `/tmp/ipm_muxd`，**未装进系统**）
+前台运行，系统那份 mask 掉，然后 `--enable-only` 发 `0x52 wIndex=2`，再用 `--no-cycle`
+claim interface 2：
+
+```
+handshake state       : 2          ← Negotiating
+handshake state       : 3          ← Streaming
+video                 : samples=849 bytes=55087418 parameter_sets=yes
+audio                 : packets=1164 bytes=4767744
+outbound writes       : ok=961 failed=0
+bulk reads            : with_data=2096 bytes=60660996 packets=2127
+video frames (protocol): 849
+```
+
+**849 帧真实视频（55 MB H.264）、1164 个音频包、961 次出站写全部成功、零失败。**
+握手从 `WaitingForPing(0)` 一路走到 `Streaming(3)`。
+
+第 2 条命题（iOS 需要活着的 lockdown/mux 会话才肯发 `SYNC CWPA`）**成立**。
+usbmuxd 的日志里能直接看到那条会话：
+
+```
+connection_teardown dev 2 sport 10 dport 62078
+```
+
+`62078` 就是 lockdown 的端口。所以 Windows 上 AMDS 提供的那个东西，在 Linux 上由
+Valeria-aware 的 usbmuxd 提供，前提只是它得肯待在配置 5 上。
+
+#### 落盘的东西是真的
+
+```
+ffprobe gitmux.h264 → codec=h264 2360x1640 pix_fmt=yuvj420p nb_read_frames=849
+ffprobe gitmux.wav  → pcm_s16le 48000 Hz 2ch
+```
+
+抽第 120 帧转 PNG，看到的是 iPad 桌面本身：时钟/备忘录/照片/天气小组件、Dock、
+分页指示点，2360×1640 横屏。
+
+再把这份真机流灌回我们自己的解码器和渲染器：
+
+```
+decoder : h264 (libavcodec vaapi) output=nv12 hardware=yes   frames: 300/300
+first frame : 2360x1640 stride=2360 bytes=5805600 format=nv12
+colour  : primaries=bt709 transfer=srgb matrix=bt709 range=full hdr=no
+renderer: vs CPU colour maths mean=0.870 worst=158 → PASS
+exported surface : memory_fd=65 done_fd=66 free_fd=67 vk_format=37
+```
+
+注意色彩那行：`transfer=srgb`、`range=full` 不是我们的兜底默认值，而是**从设备码流的 VUI
+里读出来的**——色彩合并逻辑确实在按设计工作，而不是一路套默认值。
+
+**至此 M1 的整条链在真机数据上闭环**：USB 采集 → 解码（VAAPI）→ libplacebo 渲染 →
+导出 FD。只剩把 FD 导进 Avalonia 窗口（WP6）。
+
+#### 关于「怎么让用户拿到能用的 usbmuxd」
+
+实验用的是本地构建、前台运行、系统 unit mask 掉的方式，**没有改动系统**。发行时的方案
+选择见上面那一节，现在有了实测结果，判据也清楚了：**必须是 Valeria-aware 的 usbmuxd，
+1.1.1 不行。**
+判据是 usbmuxd 日志里出现
 `Found Valeria and Apple USB Multiplexor in device ... configuration 5`，
 并且我们的握手能从 `WaitingForAudioClock` 走到 `Negotiating`。
 
