@@ -1287,6 +1287,59 @@ latest-frame 邮箱（`std::shared_ptr<const media::DecodedFrame>`），注释�
 `im_linux_preview_present_nv12` 是这一步之前的临时入口，组装完成后流式路径直连渲染器，
 不再需要它。
 
+### 打磨项与「反控」的现状
+
+#### 环境报告现在会说明 usbmuxd 的要求
+
+`LinuxEnvironmentProbe` 的 `Report` 多了 `ValeriaMuxSupport`（`Unknown` /
+`Verified` / `Rejected`），`describe()` 据此输出。这落实了「**检测并报告，不替换用户的
+守护进程**」那个决定——依据是 `IPhoneFilterDriverService.cs` 里那句
+"The WPF process intentionally never installs or mutates drivers."。
+
+**判定方式是观察而不是询问**：usbmuxd 的套接字协议不报版本号，所以能给出确定结论的只有
+一种情形——看到某台设备处于采集配置**而 usbmuxd 仍然连着它**就是共存的证明，反之
+（配置在、usbmuxd 没连）就是反证。目前 `Verified` / `Rejected` 的自动判定还没接上
+（`probe()` 不枚举配置数），所以实际输出走 `Unknown` 分支，把**要求**讲清楚：
+
+```
+有线采集要求 usbmuxd 支持 Valeria 配置（1.1.1 不行）；当前尚未观察到可判定的证据。
+```
+
+要把自动判定接上，需要 `probe()` 同时读 libusb 的配置数和 usbmux 的 `ListDevices` 做
+关联——`LinuxDeviceManager` 已经在做这个合并，所以数据源是现成的。
+
+#### 「启动时 drain」实测：正常路径不需要，问题只在非正常退出之后
+
+连续两轮 `--device` 实测：第一轮只出 1 帧、第二轮 1200 帧。第一轮之前有一个被 `pkill`
+杀掉的实例——`pkill` 不给 `im_stop_capture` 运行的机会，所以下一次启动要额外花时间收拾。
+**正常 `im_stop_capture` 之后的连续会话没有这个问题**，所以这不是正常路径的缺陷，而是
+「进程被杀之后设备状态需要恢复」。真要做，做的是崩溃/被杀后的恢复，不是每次启动都 drain。
+
+#### 反控（从桌面控制 iPad）的现状与形状
+
+Windows 侧的实现是 `src/App/Services/BluetoothHidMouseService.cs`，**1515 行 WinRT GATT**：
+桌面把自己注册成一个 BLE HID 外设（GATT server），iPad 把它当蓝牙鼠标/键盘。周边还有几个
+**纯 C#、平台中性**的小件，可以原样复用：
+
+| 文件 | 行数 | 性质 |
+|---|---|---|
+| `BluetoothHidMouseService.cs` | 1515 | **WinRT，需要 Linux 对应实现** |
+| `BluetoothClientRouteTable.cs` | 165 | 纯 C#，可复用 |
+| `BluetoothMouseOrientationMapper.cs` | 68 | 纯 C#，可复用 |
+| `BluetoothMouseReportCoalescer.cs` | 32 | 纯 C#，可复用 |
+| `BluetoothClientInfo.cs` | 22 | 纯 C#，可复用 |
+| `BluetoothControlNoticePolicy.cs` | 18 | 纯 C#，可复用 |
+| `BluetoothHidProtocol.cs` | 7 | 纯 C#，可复用 |
+
+即**约 285 行可以直接搬，1515 行需要换底座**。Linux 的对应物是 BlueZ 的
+`org.bluez.GattManager1` + HOGP（HID over GATT），走 D-Bus，形状与 WinRT 的
+`GattServiceProvider` 差别不小。这一条也需要和 iPad 做蓝牙配对，属于真机闸门。
+
+**注意这与 v1 范围的既有记载冲突**：本文档「v1 明确不包含」一节写着「BLE HID 鼠标/键盘
+控制：WinRT GATT → BlueZ D-Bus HOGP 属于独立模块，需真机验证 iOS 辅助触控行为后另行
+安排」。星翼现在把它排进了 M1 之后的下一件，所以那条记载需要按新的优先级更新——但**范围
+变更该由星翼确认，不由我改**，所以此处只记录冲突。
+
 ### v1 明确不包含
 
 - 虚拟摄像头（`src/VirtualCamera`）：Linux 侧应走 v4l2loopback 或 PipeWire 虚拟节点，

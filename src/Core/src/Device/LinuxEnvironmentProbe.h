@@ -58,8 +58,23 @@ struct UsbAccessFinding {
     std::uint32_t apple_nodes_openable{};
 };
 
+// Whether the running usbmuxd will share the capture configuration with us.
+// usbmuxd 1.1.1 clamps its configuration choice to 4 and abandons an Apple
+// device that is on the capture configuration, which leaves iOS without the
+// lockdown session it needs before it will stream. Nothing in the daemon's
+// socket protocol reports its version, so this is observed rather than asked:
+// seeing a device that exposes the capture configuration while usbmuxd is still
+// connected is proof of coexistence, and seeing the configuration with no
+// usbmuxd connection is proof of the opposite.
+enum class ValeriaMuxSupport {
+    Unknown,
+    Verified,
+    Rejected,
+};
+
 struct Report {
     UsbmuxdAvailability usbmuxd{UsbmuxdAvailability::NotInstalled};
+    ValeriaMuxSupport valeria_mux{ValeriaMuxSupport::Unknown};
     std::string usbmuxd_socket_path;
     // What made the daemon look installed: its executable or its systemd unit.
     std::string usbmuxd_evidence_path;

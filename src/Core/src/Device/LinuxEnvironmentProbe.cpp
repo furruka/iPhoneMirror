@@ -204,6 +204,22 @@ std::wstring describe(const Report& report) {
         break;
     }
 
+    switch (report.valeria_mux) {
+    case ValeriaMuxSupport::Verified:
+        text += " usbmuxd 与采集配置共存已验证（它支持 Valeria）。";
+        break;
+    case ValeriaMuxSupport::Rejected:
+        text += " 检测到设备处于采集配置，但 usbmuxd 没有连接它——这台机器上的 usbmuxd "
+                "不支持 Valeria（1.1.1 会把配置号钳到 4 并放弃设备），iOS 因此拿不到"
+                "它需要的 lockdown 会话。请换用支持 Valeria 的 usbmuxd（git master 之后）。";
+        break;
+    case ValeriaMuxSupport::Unknown:
+        text += " 有线采集要求 usbmuxd 支持 Valeria 配置（1.1.1 不行）；当前尚未观察到"
+                "可判定的证据。";
+        break;
+    }
+
+
     switch (report.usb_access.access) {
     case UsbAccess::Granted:
         text += std::format(" Apple USB 设备节点可打开（{}/{}）。",
