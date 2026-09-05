@@ -33,6 +33,7 @@
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <utility>
 #include <span>
 #include <string>
 #include <string_view>
@@ -231,12 +232,36 @@ struct RecoveryOutcome {
     bool ready{};
     std::uint32_t configuration_attempts{};
     std::uint32_t configuration_overwrites{};
+    std::uint32_t claim_attempts{};
     std::string diagnostic;
+    // Claimed here rather than by the caller: usbmuxd re-selects a
+    // configuration of its own within a few hundred milliseconds, and a claimed
+    // interface is what stops it, so the claim cannot wait for the next loop.
+    std::optional<transport::QtUsbConnection> connection;
 };
+
+bool try_claim(transport::QtUsbContext& context,
+    const transport::AppleUsbIdentity& identity, RecoveryOutcome& outcome) {
+    ++outcome.claim_attempts;
+    try {
+        outcome.connection = transport::QtUsbConnection::open_quicktime(context,
+            identity, false);
+        outcome.ready = true;
+        logging::write(std::format("wp4_recovery claimed attempt={}",
+            outcome.claim_attempts));
+        return true;
+    } catch (const std::exception& error) {
+        logging::write(std::format("wp4_recovery claim_failed attempt={} error={}",
+            outcome.claim_attempts, error.what()));
+        outcome.connection.reset();
+        return false;
+    }
+}
 
 RecoveryOutcome recover_quicktime_configuration(device::UdevAppleMonitor& monitor,
     transport::QtUsbContext& context, const transport::AppleUsbIdentity& identity,
-    const std::string& port_path, std::chrono::seconds timeout, bool verbose) {
+    const std::string& port_path, std::chrono::seconds timeout,
+    bool expect_detach, bool verbose) {
     using capture::detail::classify_reenumeration_state;
     using capture::detail::ReenumerationAction;
     using capture::detail::UsbReenumerationPolicy;
@@ -244,11 +269,17 @@ RecoveryOutcome recover_quicktime_configuration(device::UdevAppleMonitor& monito
     RecoveryOutcome outcome;
     UsbReenumerationPolicy policy;
     const auto deadline = Clock::now() + timeout;
+    // The 0x52 request takes the better part of a second to detach the device.
+    // Driving the policy before that happens spends the whole attempt budget on
+    // the pre-detach instance, whose configuration usbmuxd is still holding, so
+    // every request comes back LIBUSB_ERROR_BUSY and the recovery gives up
+    // before the window it was waiting for ever opens.
+    bool detach_seen = !expect_detach;
 
     while (Clock::now() < deadline) {
-        // The monitor's wait doubles as the settle interval: an event means the
-        // state just changed, a timeout means it is quiet enough to re-sample.
-        (void)monitor.wait_for_event(std::chrono::milliseconds(250));
+        // Short wait: an event means the state just changed and the window
+        // before usbmuxd claims its own interface is only tens of milliseconds.
+        (void)monitor.wait_for_event(std::chrono::milliseconds(50));
 
         std::optional<device::UdevAppleDevice> sample;
         for (const auto& candidate : monitor.enumerate()) {
@@ -264,16 +295,22 @@ RecoveryOutcome recover_quicktime_configuration(device::UdevAppleMonitor& monito
             }
         }
 
-        bool quicktime_descriptor{};
-        if (sample) {
-            // The descriptor set is only visible through libusb; sysfs does not
-            // expose interface classes of inactive configurations.
-            try {
-                if (const auto device = context.find_apple_device(identity, false))
-                    quicktime_descriptor = device->quicktime_configuration;
-            } catch (...) {
+        // Deliberately not find_apple_device: that opens every Apple device to
+        // read serials and costs more than the whole race window. The
+        // configuration count from sysfs answers the same question, because the
+        // QuickTime configuration is the one 0x52 appends.
+        const bool quicktime_descriptor = sample &&
+            identity.expected_quicktime_configuration != 0 &&
+            sample->configuration_count >= identity.expected_quicktime_configuration;
+        if (quicktime_descriptor) policy.note_quicktime_descriptor_present();
+
+        if (!sample) detach_seen = true;
+        if (!detach_seen) {
+            if (verbose) {
+                std::fprintf(stderr,
+                    "recovery waiting for the 0x52 detach (still enumerated)\n");
             }
-            if (quicktime_descriptor) policy.note_quicktime_descriptor_present();
+            continue;
         }
 
         const auto observation = classify_reenumeration_state(
@@ -306,11 +343,16 @@ RecoveryOutcome recover_quicktime_configuration(device::UdevAppleMonitor& monito
                 identity.expected_quicktime_configuration,
                 policy.configuration_attempts(), applied.applied,
                 applied.diagnostic));
+            // Claim right away on success. Sampling again first would give the
+            // configuration away.
+            if (applied.applied && try_claim(context, identity, outcome)) break;
             continue;
         }
         if (action == ReenumerationAction::Claim) {
-            outcome.ready = true;
-            break;
+            if (try_claim(context, identity, outcome)) break;
+            // Another process holds the interface. Keep sampling until the
+            // deadline rather than declaring failure on one lost race.
+            continue;
         }
         if (action == ReenumerationAction::GiveUp) {
             outcome.diagnostic =
@@ -332,7 +374,8 @@ RecoveryOutcome recover_quicktime_configuration(device::UdevAppleMonitor& monito
 // writes every sample it yields to disk. The protocol side is the shared
 // SessionProtocol, so a success here also proves the handshake works on Linux.
 int stream_to_disk(transport::QtUsbContext& context,
-    const transport::AppleUsbIdentity& identity, const Options& options) {
+    const transport::AppleUsbIdentity& identity, const Options& options,
+    transport::QtUsbConnection connection) {
     std::error_code directory_error;
     std::filesystem::create_directories(
         std::filesystem::path(options.video_path).parent_path(), directory_error);
@@ -344,15 +387,15 @@ int stream_to_disk(transport::QtUsbContext& context,
     }
     WavWriter audio;
 
-    transport::QtUsbConnection connection;
-    try {
-        connection = transport::QtUsbConnection::open_quicktime(context, identity,
-            false);
-    } catch (const std::exception& error) {
-        std::fprintf(stderr, "cannot open the QuickTime endpoint: %s\n",
-            error.what());
-        return 1;
+    if (const auto described = context.find_apple_device(identity, true)) {
+        const auto& endpoints = described->quicktime_endpoints;
+        std::printf("endpoints             : config=%u interface=%u alt=%u "
+                    "in=0x%02x out=0x%02x in_packet=%u out_packet=%u\n",
+            endpoints.configuration, endpoints.interface_number,
+            endpoints.alternate_setting, endpoints.bulk_in, endpoints.bulk_out,
+            endpoints.bulk_in_packet_size, endpoints.bulk_out_packet_size);
     }
+
     try { connection.clear_halt(); } catch (...) {}
 
     quicktime::SessionOptions session_options;
@@ -364,6 +407,10 @@ int stream_to_disk(transport::QtUsbContext& context,
     std::vector<std::uint8_t> read_buffer(1024U * 1024U);
     std::uint64_t audio_packets{};
     std::uint8_t nalu_length_size{4};
+    std::uint64_t bytes_read{};
+    std::uint64_t reads_with_data{};
+    std::uint64_t packets_decoded{};
+    auto last_state = quicktime::SessionState::WaitingForPing;
     const auto deadline = Clock::now() + options.duration;
     bool ping_sent{};
 
@@ -374,6 +421,10 @@ int stream_to_disk(transport::QtUsbContext& context,
         } catch (const std::exception& error) {
             std::fprintf(stderr, "bulk read failed: %s\n", error.what());
             break;
+        }
+        if (count != 0) {
+            bytes_read += count;
+            ++reads_with_data;
         }
         if (count == 0) {
             // The reference flow sends one PING after the first read timeout so
@@ -389,6 +440,7 @@ int stream_to_disk(transport::QtUsbContext& context,
         }
 
         for (const auto& packet : decoder.push(std::span(read_buffer).first(count))) {
+            ++packets_decoded;
             quicktime::SessionEvent event;
             try {
                 event = protocol.process(packet);
@@ -398,6 +450,11 @@ int stream_to_disk(transport::QtUsbContext& context,
             }
             for (const auto& response : event.outbound) {
                 try { connection.write(response, 1000); } catch (...) {}
+            }
+            if (event.state != last_state) {
+                last_state = event.state;
+                std::printf("handshake state       : %d\n",
+                    static_cast<int>(last_state));
             }
             if (event.video_sample) {
                 const auto& sample = *event.video_sample;
@@ -454,6 +511,12 @@ finished:
     std::printf("audio                 : %s packets=%llu bytes=%zu\n",
         options.audio_path.c_str(),
         static_cast<unsigned long long>(audio_packets), audio.data_bytes());
+    std::printf("bulk reads            : with_data=%llu bytes=%llu packets=%llu\n",
+        static_cast<unsigned long long>(reads_with_data),
+        static_cast<unsigned long long>(bytes_read),
+        static_cast<unsigned long long>(packets_decoded));
+    std::printf("handshake final state : %d (0=WaitingForPing)\n",
+        static_cast<int>(protocol.state()));
     std::printf("video frames (protocol): %llu\n",
         static_cast<unsigned long long>(protocol.video_frames()));
     std::printf("normal configuration  : %s\n",
@@ -486,6 +549,7 @@ int main(int argc, char** argv) {
     transport::AppleUsbIdentity identity;
     identity.serial = options->serial;
     std::string port_path;
+    bool detach_expected{};
 
     try {
         transport::QtUsbContext preflight(false);
@@ -511,15 +575,24 @@ int main(int argc, char** argv) {
         std::printf("quicktime descriptor  : %s\n",
             device->quicktime_configuration ? "present" : "absent");
 
-        if (!device->quicktime_configuration) {
+        const bool quicktime_active = device->active_configuration_known &&
+            identity.expected_quicktime_configuration != 0 &&
+            device->active_configuration ==
+                identity.expected_quicktime_configuration;
+        if (!quicktime_active) {
             // 0x52 with wIndex=2 asks iOS to expose the hidden capture
-            // configuration. The device detaches; udev then re-adds it.
-            std::printf("enabling the QuickTime configuration (0x52 wIndex=2)\n");
+            // configuration and detaches the device. Sent even when the
+            // descriptor is already present, because that detach is the only
+            // moment SET_CONFIGURATION can succeed: once usbmuxd has claimed an
+            // interface the request returns LIBUSB_ERROR_BUSY.
+            std::printf("forcing re-enumeration (0x52 wIndex=2) to open the "
+                        "configuration window\n");
             const bool acknowledged =
                 transport::QtUsbConnection::enable_quicktime_configuration(
                     preflight, identity);
             std::printf("0x52 acknowledged     : %s\n",
                 acknowledged ? "yes" : "no (re-enumeration is the authority)");
+            detach_expected = true;
         }
     } catch (const std::exception& error) {
         std::fprintf(stderr, "preflight failed: %s\n", error.what());
@@ -528,18 +601,22 @@ int main(int argc, char** argv) {
 
     // A fresh context: the previous one's device list is stale after the detach.
     transport::QtUsbContext context(false);
-    const auto recovery = recover_quicktime_configuration(monitor, context,
-        identity, port_path, std::chrono::seconds(30), options->verbose);
-    std::printf("recovery              : ready=%s attempts=%u overwrites=%u %s\n",
+    auto recovery = recover_quicktime_configuration(monitor, context,
+        identity, port_path, std::chrono::seconds(30), detach_expected,
+        options->verbose);
+    std::printf("recovery              : ready=%s set_attempts=%u overwrites=%u "
+                "claim_attempts=%u %s\n",
         recovery.ready ? "yes" : "no", recovery.configuration_attempts,
-        recovery.configuration_overwrites, recovery.diagnostic.c_str());
+        recovery.configuration_overwrites, recovery.claim_attempts,
+        recovery.diagnostic.c_str());
     if (recovery.configuration_overwrites > 0) {
         std::printf("  udev wrote bConfigurationValue back to 0 %u time(s): "
                     "39-usbmuxd.rules is active on this device\n",
             recovery.configuration_overwrites);
     }
-    if (!recovery.ready) return 1;
+    if (!recovery.ready || !recovery.connection) return 1;
 
-    return stream_to_disk(context, identity, *options);
+    return stream_to_disk(context, identity, *options,
+        std::move(*recovery.connection));
 }
 

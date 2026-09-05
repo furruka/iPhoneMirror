@@ -171,6 +171,54 @@ cmake --build build/linux
 重发 SET_CONFIGURATION 能否让配置留住；usbmuxd 是否会抢回设备；
 `uaccess` ACL 是否覆盖 `/dev/bus/usb` 节点；握手状态机在 iOS 27 Beta 4 上的行为。
 
+### WP4 真机实测（2026-09-05，iPad Air M3 / iPadOS 27 Beta 4）
+
+设备：`05ac:12ab`，udid `00008122-000161993C98401C`，端口 `3-2`。
+
+**已验证通过**：
+
+| 项 | 结论 |
+|---|---|
+| `uaccess` ACL | **有效**。`/dev/bus/usb/003/032` 属主是 `usbmux:root`，但 ACL 含 `user:furruka:rw-`，正是 `TAG+="uaccess"` 的产物 |
+| usbmuxd 由 udev 拉起 | **成立**。接入后 `usbmuxd.service` 自动从 inactive 变为运行 |
+| S1 真机（libusb 枚举） | **通过**，`apple usb devices: 1` |
+| S2 真机（AF_UNIX usbmux ListDevices） | **通过**，本项目自带的 `Plist.cpp` 解出 udid |
+| 0x52 `wIndex=2` | **有效**。设备重枚举后 `bNumConfigurations` 从 4 变 5，新增配置 5 = `PTP + Apple Mobile Device + Valeria` |
+| `expected_quicktime_configuration = highest + 1` | **猜对了**，就是 5 |
+| QuickTime 端点 | 描述符与端点都取到：config=5 interface=2 alt=0 in=0x84 out=0x03，512 字节 |
+
+**根因更正：拦路的是 usbmuxd，不是 udev。**
+
+原假设 §4.1 说 udev 会把 `bConfigurationValue` 写回 **0**。规则文本确实含
+`ATTR{bConfigurationValue}="0"`，`PRODUCT=5ac/12ab/1503` 也确实匹配
+`5ac/12[9a][0-9a-f]/*`。但实测丢配置时的值是 **4**，不是 0：
+
+```
+14:11:16.462  cfg=5     ← 我们 SET_CONFIGURATION 成功（日志 applied=true）
+14:11:16.488  ← +26 ms，后续 set 全部 LIBUSB_ERROR_BUSY（有人已 claim 接口）
+14:11:16.703  cfg=4     ← +240 ms，配置被换回 4
+```
+
+决定性实验：`systemctl stop usbmuxd` 后写 `bConfigurationValue=5`，值稳定保持
+8 秒以上不变；`systemctl start usbmuxd` 之后立刻又变回 4。**usbmuxd 是那个改
+配置的进程。**
+
+而且两者**本不冲突**：配置 5 同时含
+interface 1（`0xFF/0xFE` = usbmux）与 interface 2（`0xFF/0x2A` = QuickTime）。
+usbmuxd 完全可以在配置 5 里工作，它只是自己选了 4。
+
+由此得到两条硬约束：
+
+1. **usbmuxd 持有接口时无法改配置。** 每次 `libusb_set_configuration` 都是
+   `LIBUSB_ERROR_BUSY`。唯一可用窗口是设备重枚举后、usbmuxd claim 之前的
+   约 26 ms。
+2. **0x52 `wIndex=2` 只在首次生效时触发重枚举。** 配置 5 已存在后再发一次是
+   空操作（`acknowledged=yes` 但设备不脱离），所以拿不到新窗口。
+
+**仍未验证**：QuickTime 端点 claim 成功后（停掉 usbmuxd 时做到过），设备
+**一个字节都没发**（`bulk reads: with_data=0`）。可能原因未区分：屏幕锁定、
+未信任、或 usbmuxd 停止导致 iOS 没有 lockdown 会话因而拒绝启动 Valeria。
+
 P1 的构建结论：`src/Core` 的 5 个可移植翻译单元（Protocol / Media / CoreMedia / H264）
 在 GCC 16.2 与 Clang 22.1 下都能构建出 `libiPhoneMirror.Core.so`，`ctest` 3/3 通过
 （`OutputModeStateTests`、`UsbConfigurationRestorePolicyTests`、

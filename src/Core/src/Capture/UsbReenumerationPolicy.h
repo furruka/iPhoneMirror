@@ -3,22 +3,29 @@
 // Recovering the QuickTime USB configuration after re-enumeration on Linux.
 //
 // Windows does not need this. There, AppleUsbFilter leaves the configuration
-// the 0x52 vendor request selected in place. On Linux usbmuxd ships
-// /usr/lib/udev/rules.d/39-usbmuxd.rules, which contains:
+// the 0x52 vendor request selected in place. On Linux two actors move it:
 //
-//   ACTION=="add", ENV{USBMUX_SUPPORTED}="1", ATTR{bConfigurationValue}="0", ...
+//  - udev. usbmuxd ships /usr/lib/udev/rules.d/39-usbmuxd.rules with
+//    ACTION=="add", ENV{USBMUX_SUPPORTED}="1", ATTR{bConfigurationValue}="0",
+//    so the device is unconfigured on every add event.
+//  - usbmuxd itself, which then selects a configuration containing its own
+//    vendor-specific mux interface (subclass 0xFE).
 //
-// so every time the device re-appears udev writes the active configuration back
-// to 0, leaving it unconfigured. libusb_claim_interface then fails because no
-// configuration is selected. The host has to notice this and re-issue
-// SET_CONFIGURATION for the QuickTime value itself.
+// Measured on an iPad Air M3 (05ac:12ab, iPadOS 27 Beta 4): after the 0x52
+// request the device exposes a fifth configuration, "PTP + Apple Mobile Device +
+// Valeria", holding the PTP interface, the 0xFE mux interface and the 0x2A
+// QuickTime interface. Setting that configuration succeeded and then reverted to
+// configuration 4 roughly 240 ms later; with usbmuxd stopped the same value held
+// indefinitely. So the contention is usbmuxd, not udev, and the two are not
+// actually in conflict: both interfaces live in the same configuration.
 //
-// The race is the reason this is a state machine rather than a single call: udev
-// processes the add event asynchronously, so a configuration set too early can
-// be overwritten right afterwards. The policy therefore requires the QuickTime
-// configuration to be observed as stable across consecutive samples before it
-// lets the caller claim, bounds how many times it will re-issue the request, and
-// counts the overwrites so the caller can log what udev actually did.
+// That measurement dictates the shape of this policy. Waiting for the
+// configuration to look stable is guaranteed to lose the race, so the policy
+// claims at the first opportunity and relies on the claim to hold the
+// configuration: once an interface is claimed, another process's
+// set_configuration fails with LIBUSB_ERROR_BUSY. It still bounds how many
+// times it will re-issue the request, and it counts the losses so the caller
+// can report what actually happened.
 
 #pragma once
 
@@ -57,9 +64,17 @@ enum class ReenumerationAction {
 class UsbReenumerationPolicy final {
 public:
     // Consecutive samples with the QuickTime configuration active before the
-    // interface may be claimed. Two samples means one udev processing window
-    // has passed without the value being written back to 0.
-    static constexpr std::uint32_t StableSamplesBeforeClaim = 2;
+    // interface may be claimed.
+    //
+    // This is 1 on purpose, and the real-device measurement is why. Waiting for
+    // the configuration to look stable cannot work: usbmuxd selects a
+    // configuration of its own within a few hundred milliseconds of ours
+    // landing, so a policy that waits is guaranteed to lose. Stability is not
+    // something to observe here, it is something a claimed interface creates:
+    // once an interface is claimed, another process's set_configuration fails
+    // with LIBUSB_ERROR_BUSY. So the correct move is to claim at the first
+    // opportunity and let the claim hold the configuration.
+    static constexpr std::uint32_t StableSamplesBeforeClaim = 1;
     // How many times SET_CONFIGURATION is re-issued before giving up. Each
     // attempt costs one settle interval, so this bounds the whole recovery.
     static constexpr std::uint32_t MaxConfigurationAttempts = 5;
@@ -82,9 +97,11 @@ public:
             return ReenumerationAction::Wait;
 
         case ReenumerationObservation::PresentUnconfigured:
-            // Losing the configuration after having had it is udev writing
-            // bConfigurationValue back to 0. Count it: that count is the
-            // evidence for how this device actually behaves.
+            // Losing the configuration after having had it means another actor
+            // reset it. Measured on an iPad Air M3: udev's 39-usbmuxd.rules
+            // writes bConfigurationValue to 0 on the add event, and usbmuxd then
+            // selects a configuration containing its own mux interface. Count
+            // the loss either way; the count is the observable evidence.
             if (stable_quicktime_samples_ != 0) ++configuration_overwrites_;
             stable_quicktime_samples_ = 0;
             return request_configuration();
