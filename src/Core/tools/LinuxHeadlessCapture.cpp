@@ -58,13 +58,21 @@ struct Options {
     // pipe; the reference contradicts that, so the default is back to issuing it
     // and this switch exists to A/B the two on a device that arms Valeria.
     bool clear_halt{true};
+    // The 0x40/0x40 control kick. CaptureSession only sends it on the libusb0
+    // filter path, so the default here is off; the switch keeps it testable.
+    bool control_kick{};
+    // Skips the disable/re-enable cycle and claims the capture configuration as
+    // it already stands. The cycle exists because of a measurement that has since
+    // been invalidated (it was taken while clear_halt was not being issued), so
+    // this switch is how that belief gets retested.
+    bool cycle_configuration{true};
 };
 
 void print_usage() {
     std::fprintf(stderr,
         "usage: iPhoneMirror.Linux.HeadlessCapture --serial <udid> "
         "[--video <path.h264>] [--audio <path.wav>] [--seconds N] "
-        "[--no-clear-halt] [--verbose]\n");
+        "[--no-clear-halt] [--control-kick] [--no-cycle] [--verbose]\n");
 }
 
 std::optional<Options> parse(int argc, char** argv) {
@@ -95,6 +103,10 @@ std::optional<Options> parse(int argc, char** argv) {
             options.verbose = true;
         } else if (argument == "--no-clear-halt") {
             options.clear_halt = false;
+        } else if (argument == "--control-kick") {
+            options.control_kick = true;
+        } else if (argument == "--no-cycle") {
+            options.cycle_configuration = false;
         } else {
             return std::nullopt;
         }
@@ -425,11 +437,11 @@ int stream_to_disk(const Options& options,
     std::uint64_t packets_decoded{};
     auto last_state = quicktime::SessionState::WaitingForPing;
     const auto deadline = Clock::now() + options.duration;
-    auto next_ping = Clock::now() + std::chrono::seconds(3);
+    const auto recovery_deadline = Clock::now() + std::chrono::seconds(3);
     std::uint64_t ping_attempts{};
     std::uint64_t outbound_written{};
     std::uint64_t outbound_failed{};
-    bool ping_sent{};
+    bool recovery_attempted{};
 
     while (Clock::now() < deadline) {
         std::string io_diagnostic;
@@ -443,37 +455,39 @@ int stream_to_disk(const Options& options,
             ++reads_with_data;
         }
         if (count == 0) {
-            // The reference flow sends one PING after the first read timeout so
-            // a freshly activated endpoint starts talking. Retried here on a
-            // slow cadence, and every step reported: a silent device is the
-            // failure being diagnosed, so a swallowed write error would hide the
-            // answer.
+            // Recovery for an endpoint that never starts talking, with the same
+            // guards CaptureSession applies. Getting these wrong is what the
+            // measurement caught: without the state guard the kick and an
+            // unsolicited PING went out three seconds into a session that was
+            // already past WaitingForPing, and from that point every write
+            // returned LIBUSB_ERROR_TIMEOUT and the device stopped talking.
+            //
+            // So: once only, only while the device has said nothing, and the
+            // 0x40 control kick only when asked for. CaptureSession sends that
+            // kick exclusively on the libusb0 filter path
+            // (`if (newly_activated_libusb0)`), never on libusb1, which is the
+            // only path here.
             const auto now = Clock::now();
-            // The reference protocol documentation is explicit that the device
-            // speaks first: "we need to wait for the device to send us a ping
-            // packet", and only then does the host reply. So do not open with a
-            // PING. The control kick plus an unsolicited PING stays as a late
-            // fallback for an endpoint that never starts on its own, which is
-            // what the Windows path also does after its first read timeout.
-            if (now >= next_ping) {
-                next_ping = now + std::chrono::seconds(2);
-                ++ping_attempts;
-                if (!ping_sent) {
-                    ping_sent = true;
+            if (!recovery_attempted &&
+                protocol.state() == quicktime::SessionState::WaitingForPing &&
+                now >= recovery_deadline) {
+                recovery_attempted = true;
+                if (options.control_kick) {
                     std::string kick_diagnostic;
                     const bool kicked = connection.kick_handshake(kick_diagnostic);
                     std::printf("handshake kick        : %s\n",
                         kicked ? "ok" : kick_diagnostic.c_str());
+                } else {
+                    std::printf("handshake kick        : not issued "
+                                "(libusb1 path; --control-kick to force)\n");
                 }
+                ++ping_attempts;
                 std::string write_diagnostic;
                 if (connection.write(quicktime::make_ping(), 1000,
                         write_diagnostic)) {
-                    if (ping_attempts <= 2) {
-                        std::printf("ping write            : ok (attempt %llu)\n",
-                            static_cast<unsigned long long>(ping_attempts));
-                    }
-                } else if (ping_attempts <= 3) {
-                    std::printf("ping write            : failed (%s)\n",
+                    std::printf("recovery ping         : ok\n");
+                } else {
+                    std::printf("recovery ping         : failed (%s)\n",
                         write_diagnostic.c_str());
                 }
             }
@@ -645,24 +659,35 @@ int main(int argc, char** argv) {
         // and 0x52 wIndex=0 is acknowledged immediately but the configuration
         // only disappears around a minute later. That request is the reset, and
         // it has to be waited out rather than replaced by a replug.
-        if (device->quicktime_configuration) {
+        if (options->cycle_configuration && device->quicktime_configuration) {
             std::printf("disabling the QuickTime configuration first "
                         "(0x52 wIndex=0) so a fresh window can open\n");
-            bool disable_acknowledged{};
-            try {
-                disable_acknowledged =
-                    transport::QtUsbConnection::disable_quicktime_configuration(
-                        preflight, identity);
-            } catch (const std::exception& error) {
-                std::printf("0x52 wIndex=0         : threw (%s)\n", error.what());
-            }
-            std::printf("0x52 wIndex=0         : %s\n",
-                disable_acknowledged ? "acknowledged" : "not acknowledged");
-            // Wait for the device to come back without the extra configuration.
+            // One disable is not reliable: a run that sent exactly one and then
+            // polled for 180 s came back "still there". The reference client
+            // does not send it once either — it loops the request twenty times,
+            // re-selecting the usbmux configuration between iterations. So retry
+            // on a slow cadence while polling, and report how many it took.
             const auto reset_started = Clock::now();
             const auto reset_deadline = reset_started + std::chrono::seconds(180);
+            auto next_disable = reset_started;
+            unsigned disable_attempts{};
+            unsigned disable_acknowledged{};
             bool reset_seen{};
             while (Clock::now() < reset_deadline) {
+                if (Clock::now() >= next_disable) {
+                    next_disable = Clock::now() + std::chrono::seconds(5);
+                    ++disable_attempts;
+                    try {
+                        if (transport::QtUsbConnection::
+                                disable_quicktime_configuration(preflight, identity))
+                            ++disable_acknowledged;
+                    } catch (const std::exception& error) {
+                        if (disable_attempts == 1) {
+                            std::printf("0x52 wIndex=0         : threw (%s)\n",
+                                error.what());
+                        }
+                    }
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 bool present{};
                 for (const auto& candidate : monitor.enumerate()) {
@@ -676,6 +701,8 @@ int main(int argc, char** argv) {
                 }
                 if (reset_seen && present) break;
             }
+            std::printf("0x52 wIndex=0         : %u sent, %u acknowledged\n",
+                disable_attempts, disable_acknowledged);
             std::printf("configuration reset   : %s (waited %llds)\n",
                 reset_seen ? "yes" : "no (the extra configuration is still there)",
                 static_cast<long long>(std::chrono::duration_cast<
@@ -686,14 +713,23 @@ int main(int argc, char** argv) {
         // and detaches the device. That detach is also the only moment
         // SET_CONFIGURATION can succeed, because once usbmuxd has claimed an
         // interface the request returns LIBUSB_ERROR_BUSY.
-        std::printf("forcing re-enumeration (0x52 wIndex=2) to open the "
-                    "configuration window\n");
-        const bool acknowledged =
-            transport::QtUsbConnection::enable_quicktime_configuration(
-                preflight, identity);
-        std::printf("0x52 acknowledged     : %s\n",
-            acknowledged ? "yes" : "no (re-enumeration is the authority)");
-        detach_expected = true;
+        if (options->cycle_configuration) {
+            std::printf("forcing re-enumeration (0x52 wIndex=2) to open the "
+                        "configuration window\n");
+            const bool acknowledged =
+                transport::QtUsbConnection::enable_quicktime_configuration(
+                    preflight, identity);
+            std::printf("0x52 acknowledged     : %s\n",
+                acknowledged ? "yes" : "no (re-enumeration is the authority)");
+            detach_expected = true;
+        } else if (!device->quicktime_configuration) {
+            std::fprintf(stderr, "--no-cycle needs the capture configuration to "
+                                 "already be present\n");
+            return 1;
+        } else {
+            std::printf("configuration cycle   : skipped (--no-cycle), claiming "
+                        "the existing configuration\n");
+        }
     } catch (const std::exception& error) {
         std::fprintf(stderr, "preflight failed: %s\n", error.what());
         return 1;

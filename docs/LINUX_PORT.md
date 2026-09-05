@@ -399,19 +399,47 @@ packets=0`、`handshake final state: 4` 但从未离开过状态 0。
 「重置 data toggle 会让刚武装的 OUT 管道错开」那条假设是错的。**iPad Air M3 与
 iPhone 16 Pro 行为一致，两台都能进握手。**
 
-#### 当前真正的阻塞点：第一次交换之后就停
+#### 第二个错误：工具违反了上游对「恢复」的守卫条件
 
-两台设备现在的表现相同，卡在同一处：
+上一节说「下一步核对回给 PING 的消息」，核对之前先发现了更基础的问题。上游
+`CaptureSession.cpp` 发那条恢复序列时有三重守卫：
 
-- 设备发来 16 字节 PING，状态从 `WaitingForPing` 推进到 `WaitingForAudioClock`。
-- 协议产生的第一条出站消息**写成功**（`outbound writes: ok=1`）。
-- 之后 30 秒里 IN 再无数据（`packets=1` 就是那个 PING），而后续 ping 写全部
-  `LIBUSB_ERROR_TIMEOUT after 0 of 16`。
+```cpp
+if (!ping_recovery_attempted &&
+    protocol.state() == quicktime::SessionState::WaitingForPing &&   // 只在设备还没说话时
+    now >= ping_recovery_deadline) {
+    ping_recovery_attempted = true;                                  // 一次性
+    if (newly_activated_libusb0)                                     // 只有 libusb0 路径才发控制 kick
+        usb->recover_handshake();
+    usb->write(quicktime::make_ping(), 1000);
+}
+```
 
-即**第一次写成功、后续写超时，同时设备也不再说话**。两个方向同时停这一点值得注意：
-比起「OUT 管道单独坏了」，更像是设备在收到我们那条回复后把 Valeria 会话拆了。
-下一步应当核对我们回给 PING 的那条消息与参考实现逐字节是否一致，而不是继续调
-端点参数。这条**不需要**换设备，iPad 就能验。
+无头工具三条全违反了：`0x40/0x40` 控制 kick 无条件发（而我们走的是 libusb1，上游在
+这条路径上**根本不发**）、每 2 秒重发一次未请求的 PING、且不看状态。所以在那次成功
+的运行里，握手已经进到 `WaitingForAudioClock` 之后，第 3 秒我们往一个活着的会话里
+插了一条厂商控制请求，然后开始刷 PING——**「第一次写成功、之后全部超时、设备也不再
+说话」的直接嫌疑就是这个**，而不是协议字节错。
+
+已按上游的三重守卫改回，并把控制 kick 变成 `--control-kick` 显式开关。
+
+#### 尚未验证，而且设备现在卡住了
+
+上面那个修复**还没能验证**：iPad 目前处在采集配置摘不掉的状态。
+
+- `0x52 wIndex=0` 在 180 秒里**发了 36 次、36 次全部 acknowledged**，`bNumConfigurations`
+  始终是 5。
+- 之后让 usbmuxd 正常运行（它把活动配置选到 4）再等 2 分钟，仍然是 5。所以「需要有人
+  SET_CONFIGURATION 回普通配置才会掉」这条假设**也不成立**。
+- 在这个状态下 `--no-cycle`（直接 claim 已存在的配置）也不行：5 次 set + 5 次 claim
+  全失败，`active_config` 一直停在 4，`overwrites=0`。
+
+即：**这台设备现在既不肯摘掉采集配置，也不肯把它设为活动配置。** 已知拔插不能复位，
+disable 请求被 acknowledged 但无效，所以要继续验证需要真正重启设备。
+
+顺带一条工具改进（来自参考实现，它的 disable 是 20 次循环）：reset 等待期内现在每
+5 秒重发一次 disable 并报告发了几次、几次被 ack，而不是只发一次。上面那个「36 次」
+就是这条改进测出来的。
 
 #### 关于「怎么复位」的事实更正
 
