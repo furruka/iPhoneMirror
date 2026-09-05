@@ -61,6 +61,8 @@ Linux 后端一律以新增文件实现。
 | P4-WP5A | `LinuxFFmpegVideoDecoder`：libavcodec 解码 + libswscale 转 NV12/P010 | `[x]` |
 | P4-WP5B | `LinuxPipeWireAudioRenderer`：PipeWire 播放，队列策略与 WASAPI 共享 | `[x]` |
 | P4-WP5C | VAAPI 硬件解码，失败一律退回软解；与软解逐位相同 | `[x]` |
+| P4-WP5D1 | `LinuxPlaceboRenderer`：NV12/P010 → libplacebo → RGBA，与 CPU 色彩数学一致 | `[x]` |
+| P4-WP5D2 | 导出 dmabuf + Vulkan 信号量给 Avalonia 导入 | `[ ]` |
 | P5 | Avalonia GUI（P5a 最小外壳进 M1，P5b 全量对齐随后） | `[ ]` |
 | P6 | UxPlay 引擎无线接收 | `[ ]` |
 | P7 | 打包、CI、文档 | `[ ]` |
@@ -774,6 +776,49 @@ WASAPI 侧拿不到输出端点时构造就失败，采集会话据此关掉音�
 15 行；所有*决策*逻辑已经共享）。要彻底去重就得把环本身从 `WasapiRenderer` 里抽出来，
 那不是「接口抽取」而是搬状态，属于对上游文件的结构性改动，需要 Windows CI 复验。
 **没有擅自做。** 现状是可接受的重复量。
+
+### WP5-D 第一步：libplacebo 预览渲染器（已通过，无需设备、无需窗口）
+
+`src/Core/src/Media/LinuxPlaceboRenderer.{h,cpp}`：把 `DecodedFrame` 变成显示就绪的
+RGBA，这是取代 Windows D3D11 预览的那一半。
+
+**第一步刻意停在「渲染出来、主机能读回」**。把图像导出成 dmabuf、再配上 Vulkan 信号量
+交给 Avalonia 导入，是第二步，而且它属于那个要导入它的窗口（WP6）。分开的好处是：
+色彩管线可以**单独**验证，不需要窗口、不需要设备。
+
+帧是紧凑打包的半平面缓冲，所以两个平面各上传成一张纹理，再用 `pl_frame` 的
+plane/component 模型描述给 libplacebo。色彩描述直接来自帧，不让 libplacebo 猜——把
+`VideoColorDescription` 一路带到这里就是为了这个：**同一份元数据同时驱动这里的 GPU
+路径和 `VideoFrameCopy.cpp` 里的 CPU 路径**，于是两者可以互相校验。
+
+P010 的 10 位有效数据在每个 16 位字的高端，所以显式告诉 libplacebo
+`sample_depth=16, color_depth=10, bit_shift=6`，否则它会当成 16 位信号。缩放用
+`pl_rect2df_aspect_copy` 做 letterbox 而不是拉伸——手机的宽高比就是重点。
+
+#### 验收：与两个独立参考同时对得上
+
+`src/Core/tools/LinuxRenderProbe.cpp` 读一帧裸 NV12（**输入正是 `LinuxDecodeProbe` 的
+输出，那份已经和 ffmpeg 逐字节相同**，所以这个工具测的确实是 GPU 色彩管线而不是解码器），
+渲染、读回、逐像素与本项目自己的 `convert_yuv_to_sdr` 比较：
+
+```
+device                : NVIDIA GeForce RTX 4060 Laptop GPU
+target                : 1170x2532
+vs CPU colour maths   : mean=0.873 worst=163 at (1147,1256)
+verdict               : PASS
+```
+
+再与 ffmpeg 的 RGB 转换独立对一次（抽样网格）：`mean=0.953 worst=91`。
+
+**`worst` 大而 `mean` 小于一个通道步进，正是 4:2:0 该有的样子**：libplacebo 做色度插值，
+CPU 参考取同位采样，硬色边上必然差得多，平坦区域则几乎一致。判据设在
+mean ≤ 1 个通道步进，因为超过它就意味着两边对色彩描述的理解不同，而不只是插值不同。
+
+肉眼复核了产出的 PPM：`testsrc2` 的色条顺序正确（红/绿/黄/蓝/洋红/青）、斜扫线连续无
+撕裂、左上角时间码在**上方**（没有 S3 那个垂直镜像问题）、1170×2532 竖屏比例正确。
+
+CI 只**构建**不运行它：托管 runner 没有可用 GPU，而
+`make_placebo_preview_renderer` 在那种情况下抛异常而不是假装成功。
 
 ### v1 明确不包含
 

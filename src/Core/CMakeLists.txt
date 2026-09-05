@@ -55,6 +55,7 @@ else()
         src/Transport/LinuxUsbConfiguration.cpp
         src/Media/LinuxFFmpegVideoDecoder.cpp
         src/Media/LinuxMediaBackends.cpp
+        src/Media/LinuxPlaceboRenderer.cpp
         src/Media/LinuxSharedGpuFrame.cpp)
     set(IPHONEMIRROR_CORE_SOURCES
         ${IPHONEMIRROR_CORE_PORTABLE_SOURCES}
@@ -131,12 +132,16 @@ else()
     # PipeWire plays what WASAPI plays on Windows.
     pkg_check_modules(IPHONEMIRROR_PIPEWIRE REQUIRED IMPORTED_TARGET
         libpipewire-0.3)
+    # libplacebo on Vulkan is what replaces the D3D11 preview.
+    pkg_check_modules(IPHONEMIRROR_PLACEBO REQUIRED IMPORTED_TARGET
+        libplacebo vulkan)
     target_link_libraries(iPhoneMirror.Core PRIVATE
         PkgConfig::IPHONEMIRROR_LIBUSB
         PkgConfig::IPHONEMIRROR_CRYPTO
         PkgConfig::IPHONEMIRROR_UDEV
         PkgConfig::IPHONEMIRROR_FFMPEG
-        PkgConfig::IPHONEMIRROR_PIPEWIRE)
+        PkgConfig::IPHONEMIRROR_PIPEWIRE
+        PkgConfig::IPHONEMIRROR_PLACEBO)
 endif()
 
 set_target_properties(iPhoneMirror.Core PROPERTIES
@@ -301,6 +306,22 @@ if(IPHONEMIRROR_BUILD_TESTS)
             PkgConfig::IPHONEMIRROR_FFMPEG
             PkgConfig::IPHONEMIRROR_FFMPEG_FORMAT)
 
+        # WP5 acceptance tool for the renderer. Device-free and window-free: it
+        # renders a raw NV12 frame and compares the readback against the shared
+        # CPU colour maths, so the GPU pipeline is checked on its own.
+        add_executable(iPhoneMirror.Linux.RenderProbe
+            tools/LinuxRenderProbe.cpp
+            src/Media/CoreMedia.cpp
+            src/Media/LinuxPlaceboRenderer.cpp
+            src/Media/LinuxSharedGpuFrame.cpp
+            src/Media/VideoFrameCopy.cpp
+            src/Protocol/QuickTimePacket.cpp)
+        target_include_directories(iPhoneMirror.Linux.RenderProbe PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_link_libraries(iPhoneMirror.Linux.RenderProbe PRIVATE
+            iPhoneMirror.CompileOptions
+            PkgConfig::IPHONEMIRROR_PLACEBO)
+
         # WP5 acceptance tool for the audio half. Also device-free: it plays a
         # generated tone through the real renderer and reports the counters.
         add_executable(iPhoneMirror.Linux.AudioProbe
@@ -357,7 +378,8 @@ if(IPHONEMIRROR_BUILD_TESTS)
             PkgConfig::IPHONEMIRROR_CRYPTO
             PkgConfig::IPHONEMIRROR_UDEV
             PkgConfig::IPHONEMIRROR_FFMPEG
-            PkgConfig::IPHONEMIRROR_PIPEWIRE)
+            PkgConfig::IPHONEMIRROR_PIPEWIRE
+            PkgConfig::IPHONEMIRROR_PLACEBO)
     endif()
 
     if(IPHONEMIRROR_BUILD_DANGEROUS_USB_TOOLS AND WIN32)

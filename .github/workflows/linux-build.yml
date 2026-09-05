@@ -48,11 +48,14 @@ jobs:
       # shared capture session, which link the distribution's libusb-1.0,
       # libcrypto and libudev (all REQUIRED in src/Core/CMakeLists.txt). The
       # Linux video decoder adds libavcodec/libavutil/libswscale, the audio
-      # renderer adds libpipewire-0.3, and the WP5 decode tool adds libavformat.
+      # renderer adds libpipewire-0.3, the preview renderer adds libplacebo and
+      # vulkan, and the WP5 decode tool adds libavformat. The renderer is only
+      # built here, never run: a hosted runner has no usable GPU, and
+      # make_placebo_preview_renderer throws rather than pretending otherwise.
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes ninja-build libusb-1.0-0-dev libssl-dev libudev-dev libavcodec-dev libavutil-dev libswscale-dev libavformat-dev libpipewire-0.3-dev pkg-config
+          sudo apt-get install --no-install-recommends --yes ninja-build libusb-1.0-0-dev libssl-dev libudev-dev libavcodec-dev libavutil-dev libswscale-dev libavformat-dev libpipewire-0.3-dev libplacebo-dev libvulkan-dev pkg-config
 
       - name: Configure
         env:
