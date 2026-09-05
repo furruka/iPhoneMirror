@@ -34,6 +34,7 @@ internal sealed class BluezHidService : IObjectManager, IAsyncDisposable
     private const string HidControlPointUuid = $"00002a4c-{Base}";
     private const string ReportUuid = $"00002a4d-{Base}";
     private const string ReportReferenceUuid = $"00002908-{Base}";
+    private const string ProtocolModeUuid = $"00002a4e-{Base}";
 
     private static readonly ObjectPath Root = new("/com/iphonemirror/hid");
 
@@ -175,7 +176,11 @@ internal sealed class BluezHidService : IObjectManager, IAsyncDisposable
             ["Primary"] = true,
         }));
 
-        AddCharacteristic(service, 0, ReportMapUuid, ["read"],
+        // HOGP requires an encrypted link for the report map and the reports, and
+        // the Windows implementation sets EncryptionRequired on exactly these, so
+        // the BlueZ flags say encrypt-* rather than plain read/notify. iOS
+        // subscribed without them but produced no pointer.
+        AddCharacteristic(service, 0, ReportMapUuid, ["encrypt-read"],
             HidReportMap.Descriptor);
         AddCharacteristic(service, 1, HidInformationUuid, ["read"],
             HidReportMap.HidInformation);
@@ -183,6 +188,12 @@ internal sealed class BluezHidService : IObjectManager, IAsyncDisposable
         // suspend, and HOGP forbids a response.
         AddCharacteristic(service, 2, HidControlPointUuid,
             ["write-without-response"], []);
+        // Protocol Mode, defaulting to Report mode (0x01). The Windows service
+        // publishes it and iOS reads it to decide whether the reports it just
+        // subscribed to are boot-mode or report-mode; without it there is nothing
+        // to read and the reports mean nothing.
+        AddCharacteristic(service, 7, ProtocolModeUuid,
+            ["read", "write-without-response"], [0x01]);
 
         // One Report characteristic per input report in the descriptor, each with
         // the Report Reference descriptor that tells iOS which report it is. The
@@ -200,7 +211,7 @@ internal sealed class BluezHidService : IObjectManager, IAsyncDisposable
         {
             var id = reportId;
             var characteristic = AddCharacteristic(service, index, ReportUuid,
-                ["read", "notify"], [],
+                ["encrypt-read", "encrypt-notify"], [],
                 subscribed => ReportSubscriptionChanged?.Invoke(id, subscribed));
             _reports[reportId] = characteristic;
             _objects.Add(new GattDescriptorNode(

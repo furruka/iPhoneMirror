@@ -25,7 +25,10 @@ internal static class Program
         if (arguments.Length >= 1 && arguments[0] == "--hid-probe")
             return RunHidProbe(arguments.Length >= 2 ? arguments[1] : "iPhoneMirror", 8);
         if (arguments.Length >= 1 && arguments[0] == "--hid-test")
-            return RunHidTest();
+        {
+            return RunHidTest(arguments.Length >= 2 &&
+                int.TryParse(arguments[1], out var duration) ? duration : 20);
+        }
         if (arguments.Length >= 1 && arguments[0] == "--hid-serve")
         {
             var seconds = arguments.Length >= 3 && int.TryParse(arguments[2], out var s)
@@ -136,7 +139,7 @@ internal static class Program
     // HOGP puts the report ID in the Report Reference descriptor, not in the
     // value, so the payload is the report body alone: buttons, then X and Y as
     // 16-bit signed, then the wheel.
-    private static int RunHidTest()
+    private static int RunHidTest(int seconds)
     {
         return Task.Run(async () =>
         {
@@ -160,15 +163,19 @@ internal static class Program
             // Allocated once: CA2014 rightly objects to stackalloc in a loop, and
             // a six-byte report does not need a fresh buffer per tick anyway.
             var report = new byte[6];
+            // Big steps and a long sweep per side: a small square finished in
+            // twenty seconds, which was too short to catch on the device.
             var steps = new (short X, short Y)[]
             {
-                (24, 0), (0, 24), (-24, 0), (0, -24),
+                (60, 0), (0, 60), (-60, 0), (0, -60),
             };
-            for (var lap = 0; lap < 20; ++lap)
+            var deadline = DateTime.UtcNow.AddSeconds(seconds);
+            var lap = 0;
+            while (DateTime.UtcNow < deadline)
             {
                 foreach (var step in steps)
                 {
-                    for (var repeat = 0; repeat < 10; ++repeat)
+                    for (var repeat = 0; repeat < 12; ++repeat)
                     {
                         report[0] = 0;
                         BitConverter.TryWriteBytes(report.AsSpan(1, 2), step.X);
@@ -177,12 +184,13 @@ internal static class Program
                         if (service.SendReport(
                                 Services.HidReportMap.MouseReportId, report))
                             ++sent;
-                        await Task.Delay(16);
+                        await Task.Delay(20);
                     }
                 }
-                if (lap % 5 == 0) Console.WriteLine($"  lap {lap}, {sent} reports sent");
+                if (++lap % 10 == 0)
+                    Console.WriteLine($"  lap {lap}, {sent} reports sent");
             }
-            Console.WriteLine($"done: {sent} mouse reports sent");
+            Console.WriteLine($"done: {sent} mouse reports sent over {seconds}s");
             return sent > 0 ? 0 : 3;
         }).GetAwaiter().GetResult();
     }

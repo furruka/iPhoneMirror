@@ -1426,6 +1426,29 @@ done: 800 mouse reports sent
 HOGP 的报告值里**不含 report ID**——ID 由 Report Reference 描述符携带，所以鼠标载荷是
 6 字节：按钮、X（16 位有符号）、Y、滚轮。这一点搞错的话 iOS 会静默丢弃报告。
 
+##### 反控通了：指针在 iPad 上动起来了
+
+星翼确认指针在动。**让它从「订阅了但没反应」变成「真的动」的是两处，都是照着 Windows
+那份实现对出来的**，不是猜的：
+
+**一、Protocol Mode 特征（0x2A4E）缺失。** `BluetoothHidMouseService` 里有
+`DefaultProtocolMode = [0x01]`（Report 模式）并把它作为一个可读可写的特征发布出去。
+我们原来没有这个特征——iOS 订阅了报告，但**没有东西可读来确定这些报告是 boot 模式还是
+report 模式**，于是报告没有意义。
+
+**二、报告特征的加密标志。** Windows 那侧在 report map 和 report 上都设了
+`GattProtectionLevel.EncryptionRequired`。我们原来用的是朴素的 `read` / `notify`；
+BlueZ 的对应写法是 `encrypt-read` / `encrypt-notify`。**iOS 会在没有加密标志的情况下
+照样订阅，但不会据此产生指针**——这是最容易误判为「连接成功了但协议错」的地方。
+
+顺带一个自己制造的坑：Protocol Mode 一开始放在 `char6`，和四个报告占用的
+`char3..char6` 撞了，`RegisterObjectAsync` 直接抛
+`An item with the same key has already been added`。改到 `char7`。
+
+还有一条关于「怎么验」的教训：第一版把指针走一个 24 单位的小方框、20 圈，**约 20 秒就
+跑完了**，星翼去看的时候早已结束——于是得到一个假的负面结论。改成 60 单位步长、按秒数
+持续扫描之后才看得见。**验证动作本身的可观察时长也要算进设计里。**
+
 ##### 剩下的是真机闸门
 
 `Appearance` 用 `0x03C1`（Keyboard）。Feature report（id 3）**故意没导出**——目前没有任何
