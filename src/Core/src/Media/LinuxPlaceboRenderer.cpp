@@ -18,6 +18,7 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <cstring>
 #include <format>
 #include <stdexcept>
 #include <string>
@@ -64,7 +65,7 @@ namespace {
 class PlaceboPreviewRenderer final : public ILinuxPreviewRenderer {
 public:
     PlaceboPreviewRenderer(std::uint32_t target_width,
-        std::uint32_t target_height)
+        std::uint32_t target_height, const std::uint8_t* device_uuid)
         : width_(target_width), height_(target_height) {
         if (width_ == 0 || height_ == 0)
             throw std::invalid_argument("the preview target has no area");
@@ -75,6 +76,10 @@ public:
         if (log_ == nullptr) throw std::runtime_error("pl_log_create failed");
 
         struct pl_vulkan_params vulkan_params = pl_vulkan_default_params;
+        // Same physical device as the importer, or the handover fails later in a
+        // place that does not name the cause.
+        if (device_uuid != nullptr)
+            std::memcpy(vulkan_params.device_uuid, device_uuid, 16);
         vulkan_ = pl_vulkan_create(log_, &vulkan_params);
         if (vulkan_ == nullptr) {
             destroy();
@@ -332,8 +337,10 @@ private:
 } // namespace
 
 std::unique_ptr<ILinuxPreviewRenderer> make_placebo_preview_renderer(
-    std::uint32_t target_width, std::uint32_t target_height) {
-    return std::make_unique<PlaceboPreviewRenderer>(target_width, target_height);
+    std::uint32_t target_width, std::uint32_t target_height,
+    const std::uint8_t* device_uuid) {
+    return std::make_unique<PlaceboPreviewRenderer>(target_width, target_height,
+        device_uuid);
 }
 
 } // namespace iPhoneMirror::media

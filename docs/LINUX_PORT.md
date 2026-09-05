@@ -64,6 +64,7 @@ Linux 后端一律以新增文件实现。
 | P4-WP5D1 | `LinuxPlaceboRenderer`：NV12/P010 → libplacebo → RGBA，与 CPU 色彩数学一致 | `[x]` |
 | P4-WP5D2 | 导出内存 FD + 双向 Vulkan 信号量（Avalonia 导入端属 WP6） | `[x]` |
 | P5-WP6a | 预览 C ABI（`LinuxPreviewApi.h`，5 个导出，ABI 尺寸自校验） | `[x]` |
+| P5-WP6b | Avalonia 最小外壳：导入成功，**帧还没上屏**（见下） | `[~]` |
 | P5 | Avalonia GUI（P5a 最小外壳进 M1，P5b 全量对齐随后） | `[~]` |
 | P6 | UxPlay 引擎无线接收 | `[ ]` |
 | P7 | 打包、CI、文档 | `[ ]` |
@@ -1130,6 +1131,49 @@ verdict               : PASS
 ```
 
 `nm -D` 确认五个符号都以默认可见性导出。
+
+### WP6 第二步：Avalonia 最小外壳（导入已通，画面未上屏）
+
+`src/LinuxShell/`：独立的 Avalonia 12.1.1 工程，不进 `build.ps1`、无解决方案条目，
+Windows 构建不受影响。P/Invoke 那五个导出，用 `ICompositionGpuInterop` 导入。
+
+#### 修掉了一个真实的多 GPU 缺陷
+
+第一次跑直接抛 `PlatformGraphicsContextLostException`，位置是
+`ServerCompositionDrawingSurface.PerformSanityChecks`——**导入成功，第一帧 present 时才失败**。
+
+原因是**设备不匹配**：Core 里的 libplacebo 自己挑 Vulkan 设备（本机挑了 NVIDIA），
+compositor 用的是另一个。**一个物理设备导出的图像不能被跑在另一个设备上的 compositor
+导入**，而这个错误只在 present 时才报，import 时不报。
+
+修法是把 compositor 的设备 UUID 一路传下去：`im_linux_preview_open` 多一个
+`const std::uint8_t* device_uuid` 参数 → `pl_vulkan_params.device_uuid`。托管侧从
+`_interop.DeviceUuid` 取。S3 spike 当初就是这么做的（`has_device_uuid` + `device_uuid[16]`），
+移到 Core 时漏掉了。
+
+改完之后窗口里的自诊断是：
+
+```
+abi size: match
+compositor device uuid: 8680A8A704000000000020000000000...
+surface: 2360x1640 vk_format=37 size=15761408
+import image and semaphores: ok
+```
+
+**导入这一段通了**，`PlatformGraphicsContextLostException` 不再出现。
+
+#### 但画面还是黑的，这一步没完成
+
+窗口是黑的，状态文字停在 `import image and semaphores: ok`，没有变成
+`presented N frames`。带 `--frames 30` 跑会挂住不退出（`timeout` 124 杀掉），说明
+**present 一次都没完成**。
+
+从代码路径看，最可能是 `PresentAsync` 在 `_ready`/句柄检查那里直接返回 false——那条路径
+不写 `Diagnostic`，所以状态文字保持旧值，正好是观察到的现象。**这是推断，不是结论**：
+下一步要在 `PresentAsync` 的每个提前返回上加各自的诊断字符串，先把「哪一个条件不成立」
+变成可观察的，再谈修。
+
+**没有把这一步记成通过。** 已通的是 ABI、导入和设备 UUID；上屏没通。
 
 ### v1 明确不包含
 

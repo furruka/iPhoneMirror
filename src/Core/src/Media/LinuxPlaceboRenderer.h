@@ -62,10 +62,17 @@ public:
     [[nodiscard]] virtual std::string_view last_error() const noexcept = 0;
 };
 
+// device_uuid, when not null, points at the 16-byte Vulkan physical-device UUID
+// the renderer must use. Passing the compositor's UUID is not optional on a
+// multi-GPU machine: an image exported from one physical device cannot be
+// imported by a compositor running on another, and Avalonia rejects it at
+// present time with PlatformGraphicsContextLostException rather than at import.
+//
 // Throws std::runtime_error when Vulkan or libplacebo cannot be initialized,
 // which on Linux is an ordinary outcome on a machine with no usable GPU. Never
 // returns null.
 [[nodiscard]] std::unique_ptr<ILinuxPreviewRenderer> make_placebo_preview_renderer(
-    std::uint32_t target_width, std::uint32_t target_height);
+    std::uint32_t target_width, std::uint32_t target_height,
+    const std::uint8_t* device_uuid = nullptr);
 
 } // namespace iPhoneMirror::media

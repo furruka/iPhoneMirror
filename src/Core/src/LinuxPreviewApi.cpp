@@ -38,11 +38,11 @@ std::uint32_t IM_CALL im_linux_preview_abi_size() {
 }
 
 std::int32_t IM_CALL im_linux_preview_open(std::uint32_t width,
-    std::uint32_t height) {
+    std::uint32_t height, const std::uint8_t* device_uuid) {
     std::scoped_lock lock(preview_mutex);
     try {
         renderer = iPhoneMirror::media::make_placebo_preview_renderer(width,
-            height);
+            height, device_uuid);
         preview_error.clear();
         return static_cast<std::int32_t>(iPhoneMirror::Result::Ok);
     } catch (const std::exception& error) {

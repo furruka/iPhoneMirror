@@ -50,7 +50,7 @@ int main(int argc, char** argv) {
     }
     std::fclose(file);
 
-    if (const auto status = im_linux_preview_open(width, height); status != 0) {
+    if (const auto status = im_linux_preview_open(width, height, nullptr); status != 0) {
         std::fprintf(stderr, "im_linux_preview_open failed: %d\n", status);
         return 1;
     }

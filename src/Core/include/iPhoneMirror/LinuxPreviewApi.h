@@ -41,11 +41,16 @@ struct LinuxPreviewSurface {
 // Size of LinuxPreviewSurface as this library sees it.
 IM_API std::uint32_t IM_CALL im_linux_preview_abi_size();
 
-// Creates the preview renderer at the given target size. Returns Ok, or
-// CaptureBackendUnavailable with im_get_last_error() explaining why — a machine
+// Creates the preview renderer at the given target size. device_uuid points at
+// the importer's 16-byte Vulkan physical-device UUID, or is null to let
+// libplacebo choose. Pass it: on a multi-GPU machine an image exported from one
+// device cannot be imported by a compositor on another, and the failure surfaces
+// only when the first frame is presented.
+//
+// Returns Ok, or CaptureBackendUnavailable with the reason recorded — a machine
 // with no usable Vulkan device is an ordinary case, not a crash.
 IM_API std::int32_t IM_CALL im_linux_preview_open(std::uint32_t width,
-    std::uint32_t height);
+    std::uint32_t height, const std::uint8_t* device_uuid);
 
 IM_API void IM_CALL im_linux_preview_close();
 

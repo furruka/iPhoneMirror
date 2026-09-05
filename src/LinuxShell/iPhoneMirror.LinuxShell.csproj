@@ -1,0 +1,26 @@
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+<!--
+  P5a: the minimal Linux shell. It imports the preview surface the Core library
+  exports and shows it, which is the last seam in M1.
+
+  Standalone by design: build.ps1 does not reference it and there is no solution
+  entry, so the Windows build is untouched.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>iPhoneMirror.LinuxShell</AssemblyName>
+    <RootNamespace>IPhoneMirror.LinuxShell</RootNamespace>
+    <PackageLicenseExpression>GPL-3.0-only</PackageLicenseExpression>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.1" />
+  </ItemGroup>
+</Project>
