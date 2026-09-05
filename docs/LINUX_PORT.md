@@ -1348,6 +1348,62 @@ HID 外设，这个字段不是装饰。
 坐标系与旋转的映射（`BluetoothMouseOrientationMapper` 那 68 行正是为此存在）、以及配对
 流程要不要用户交互。这些都是真机闸门，到时候需要星翼配合配对一次。
 
+#### 反控底座已经跑起来了（BlueZ HOGP，无需 iPad）
+
+`src/LinuxShell/Services/` 下四个文件：
+
+- `BluezInterfaces.cs` / `GattObject.cs` / `GattNodes.cs`——BlueZ 期望一个 GATT 应用
+  **导出**的那些 D-Bus 对象。**BlueZ 的模型和 WinRT 是反的**：WinRT 是请 provider 帮你
+  创建 characteristic，BlueZ 是你导出对象、它自己来遍历。
+- `BluezHidService.cs`——注册 HID 服务（0x1812）+ Report Map + HID Information +
+  HID Control Point + 四个 Report（各带 Report Reference 描述符），然后注册 peripheral
+  广播。
+- `HidReportMap.cs`——报告描述符。
+
+实测（`--hid-probe`，不需要 iPad）：
+
+```
+bluez hid register : ok
+diagnostic         : advertising as "iPhoneMirror Linux" on /org/bluez/hci0
+```
+
+而且从 BlueZ 那一侧核对过，不是只看我们自己的返回值：
+
+```
+运行期间  ActiveInstances: 1
+拆除之后  ActiveInstances: 0
+```
+
+**注意这和之前那两个 Python 探针不是一回事**：探针问的是「BlueZ 会不会接受**任何**这样的
+应用」，这一步问的是「**我们自己的** D-Bus 对象树对不对」。
+
+##### 两个踩到的坑
+
+**Tmds.DBus 要求 D-Bus 接口是 `public`。** 一开始声明成 `internal`，运行时报
+`TypeAccessException: ... GattServiceNodeAdapter.StartWatchingSignals() to access
+type IGattService1 failed`——它在动态程序集里生成适配器，访问不到 `internal` 类型。
+
+**`Tmds.DBus 0.21.2` 有已知高危漏洞**（GHSA-xrw6-gwf8-vvr9），NuGet audit 直接把它变成
+编译错误（本项目开了 `TreatWarningsAsErrors`）。换成当前版 `0.95.1` 后干净。
+
+##### 复用与重复的边界
+
+那五个**零 `using`** 的纯 C# 文件用 `<Compile Include="../App/Services/...">` **链接编译，
+不复制**，所以两个平台不会漂移。`BluetoothClientInfo.cs` 故意没链——它引了 WPF 工程的
+localization。
+
+`HidReportMap.Descriptor` 是 `BluetoothHidMouseService.ReportMap` 的**副本**，这一处是
+重复而不是链接，理由写在文件头：WPF 工程在 Linux 上编不了，把它抽出来就等于**改一个本侧
+无法编译验证的文件**。那次抽取应该是一个由 Windows CI 验证的独立改动。
+
+##### 剩下的是真机闸门
+
+`Appearance` 用 `0x03C1`（Keyboard）。Feature report（id 3）**故意没导出**——目前没有任何
+代码会写它，导出一个从不写的 characteristic 就是一句不兑现的承诺。
+
+下一步需要星翼配合：**在 iPad 的蓝牙设置里和这台机器配一次对**，然后才能验证 iOS 认不认
+这个 HID 外设、辅助触控要不要手动开、坐标系与旋转怎么映射。
+
 #### 反控（从桌面控制 iPad）的现状与形状
 
 Windows 侧的实现是 `src/App/Services/BluetoothHidMouseService.cs`，**1515 行 WinRT GATT**：

@@ -22,5 +22,21 @@
   <ItemGroup>
     <PackageReference Include="Avalonia" Version="12.1.1" />
     <PackageReference Include="Avalonia.Desktop" Version="12.1.1" />
+    <!-- Registering GATT objects means serving D-Bus objects, not just calling
+         methods, which is why this is the higher-level Tmds.DBus rather than the
+         protocol-only package. -->
+    <PackageReference Include="Tmds.DBus" Version="0.95.1" />
+  </ItemGroup>
+
+  <!-- Linked, not copied: these five files are pure C# with no using directives
+       at all, so they compile unchanged here, and linking keeps one copy so the
+       two platforms cannot drift. BluetoothClientInfo.cs is deliberately absent:
+       it pulls in the WPF project's localization. -->
+  <ItemGroup>
+    <Compile Include="../App/Services/BluetoothHidProtocol.cs" />
+    <Compile Include="../App/Services/BluetoothMouseOrientationMapper.cs" />
+    <Compile Include="../App/Services/BluetoothMouseReportCoalescer.cs" />
+    <Compile Include="../App/Services/BluetoothControlNoticePolicy.cs" />
+    <Compile Include="../App/Services/BluetoothClientRouteTable.cs" />
   </ItemGroup>
 </Project>

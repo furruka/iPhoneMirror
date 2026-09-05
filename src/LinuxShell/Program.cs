@@ -22,6 +22,8 @@ internal static class Program
 
     private static int Main(string[] arguments)
     {
+        if (arguments.Length >= 1 && arguments[0] == "--hid-probe")
+            return RunHidProbe(arguments.Length >= 2 ? arguments[1] : "iPhoneMirror");
         if (arguments.Length >= 2 && arguments[0] == "--device")
         {
             return RunDevice(arguments[1],
@@ -33,7 +35,8 @@ internal static class Program
                 "usage: iPhoneMirror.LinuxShell <frames.nv12> <width> <height> "
                 + "[--frames N]\n"
                 + "       iPhoneMirror.LinuxShell --device <udid> "
-                + "[<width> <height>]");
+                + "[<width> <height>]\n"
+                + "       iPhoneMirror.LinuxShell --hid-probe [<name>]");
             return 64;
         }
         var path = arguments[0];
@@ -87,5 +90,26 @@ internal static class Program
                 serial, code => _exitCode = code))
             .StartWithClassicDesktopLifetime(Array.Empty<string>());
         return _exitCode;
+    }
+
+    // Registers the HID peripheral through BlueZ and reports what happened, then
+    // tears it down. No window and no iPad: this checks our own D-Bus objects,
+    // which is a different thing from the earlier Python probes checking whether
+    // BlueZ would accept any such application at all.
+    private static int RunHidProbe(string name)
+    {
+        return Task.Run(async () =>
+        {
+            await using var service = new Services.BluezHidService();
+            var started = await service.StartAsync(name);
+            Console.WriteLine($"bluez hid register : {(started ? "ok" : "failed")}");
+            Console.WriteLine($"diagnostic         : {service.Diagnostic}");
+            if (!started) return 1;
+            // Long enough for bluetoothctl to show the advertisement, short
+            // enough not to leave the adapter advertising after the probe.
+            await Task.Delay(TimeSpan.FromSeconds(8));
+            Console.WriteLine("held 8s, tearing down");
+            return 0;
+        }).GetAwaiter().GetResult();
     }
 }
